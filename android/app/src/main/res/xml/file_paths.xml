@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Fotos de la cámara: van directo a la carpeta de la sesión. -->
+    <external-files-path name="sesiones" path="sesiones/" />
+    <files-path name="sesiones_internas" path="sesiones/" />
+    <!-- PDFs bajados del server para abrirlos con otra app. -->
+    <cache-path name="pdf" path="pdf/" />
+</paths>

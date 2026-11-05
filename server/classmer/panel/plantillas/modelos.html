@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% from "_modelos.html" import select_modelo, select_esfuerzo, aviso_elegido %}
+{% block titulo %}Modelos{% endblock %}
+{% block contenido %}
+<h1>Modelos</h1>
+<p class="sub">Qué modelo hace cada tarea y cómo se paga Claude. Los cambios se escriben en config.yaml (sólo las claves que cambian) y el próximo job ya los usa, sin reiniciar.</p>
+
+<div class="tarjeta">
+  <h2 style="margin-top:0">Facturación de Claude</h2>
+  <p class="chico" style="margin-top:0">Vale para todo lo que Classmer le pide a Claude: clasificar, revisar el transcript y el apunte. Sólo se cambia al otro medio por falta de créditos o de cupo, o por una clave inválida; los errores pasajeros (429, 5xx) se reintentan como siempre.</p>
+  {% if f.aviso_sin_clave %}<div class="msg aviso">{{ f.aviso_sin_clave }}.</div>{% endif %}
+  <form method="post" action="/panel/modelos">
+    <div class="campos">
+      <label for="facturacion">Modo</label>
+      <div>
+        <select name="facturacion" id="facturacion">
+          {% for valor, texto in f.modos %}<option value="{{ valor }}"{% if valor == f.modo %} selected{% endif %}>{{ texto }}</option>{% endfor %}
+        </select>
+      </div>
+
+      <label for="reintentar_api_h">Volver a probar la API<span class="ayuda">Horas después de quedarse sin créditos (también se vuelve a probar si cambia la clave del .env).</span></label>
+      <div><input type="number" min="0" step="any" id="reintentar_api_h" name="reintentar_api_h" value="{{ '%g' | format(f.horas) }}" style="width:90px"> h</div>
+    </div>
+    <div class="acciones" style="margin-top:14px">
+      <button type="submit" class="primario">Guardar facturación</button>
+    </div>
+  </form>
+
+  <h3>Estado</h3>
+  <table>
+    <thead><tr><th>Medio</th><th>Estado</th><th></th></tr></thead>
+    <tbody>
+    {% for m in f.medios %}
+    <tr>
+      <td class="nowrap">{{ m.etiqueta }}</td>
+      <td>
+        {% if m.e.ok %}<span class="estado lista">ok</span>
+        {% elif m.e.estado == 'sin_clave' %}<span class="aviso-texto">{{ m.texto }}</span> <span class="chico">(falta ANTHROPIC_API_KEY en Classmer-data\.env)</span>
+        {% else %}<span class="error-texto">{{ m.texto }}</span>{% if m.e.motivo %}<div class="chico">{{ m.e.motivo | truncate(240) }}</div>{% endif %}{% endif %}
+      </td>
+      <td class="nowrap">
+        {% if m.reintentable %}
+        <form class="linea" method="post" action="/panel/modelos/reintentar">
+          <input type="hidden" name="medio" value="{{ m.medio }}">
+          <button type="submit">Reintentar {{ m.etiqueta }}</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<form method="post" action="/panel/modelos" class="tarjeta">
+  <h2 style="margin-top:0">Modelo por tarea</h2>
+  <p class="chico" style="margin-top:0">Se eligen de la lista del catálogo (abajo), nunca a mano. Si un modelo elegido deja de aparecer, no se cambia solo: queda elegido y marcado.</p>
+  <div class="campos">
+    <label for="transcribir">Transcribir<span class="ayuda">Modelos de Gemini que transcriben audio.</span></label>
+    <div>{{ select_modelo('transcribir', opciones.transcribir) }}{{ aviso_elegido(opciones.transcribir) }}</div>
+
+    <label for="clasificar">Clasificar<span class="ayuda">Claude o Gemini (texto). El motor sale del modelo elegido.</span></label>
+    <div>
+      {{ select_modelo('clasificar', opciones.clasificar, grupos_clasificar) }}{{ aviso_elegido(opciones.clasificar) }}
+      <div style="margin-top:8px">
+        <label class="opcion" for="clasificar_esfuerzo">Esfuerzo</label>
+        {{ select_esfuerzo('clasificar_esfuerzo', cfg.clasificar.esfuerzo, 'el default del modelo', esfuerzos) }}
+        <span class="chico">sólo con Claude (con Gemini no se usa)</span>
+      </div>
+    </div>
+
+    <label for="revisar_transcript">Revisar el transcript<span class="ayuda">Modelos de Claude. Concilia el reloj y el celu y limpia el transcript; el tipo de revisión (automática, asistida o apagada) se elige en cada materia.</span></label>
+    <div>
+      {{ select_modelo('revisar_transcript', opciones.revisar_transcript) }}{{ aviso_elegido(opciones.revisar_transcript) }}
+      <div style="margin-top:8px">
+        <label class="opcion" for="revisar_transcript_esfuerzo">Esfuerzo</label>
+        {{ select_esfuerzo('revisar_transcript_esfuerzo', cfg.revisar_transcript.esfuerzo, 'el default del modelo', esfuerzos) }}
+      </div>
+    </div>
+
+    <label for="apunte">Apunte<span class="ayuda">Modelos de Claude. Cada materia puede tener el suyo (en su página).</span></label>
+    <div>
+      {{ select_modelo('apunte', opciones.apunte) }}{{ aviso_elegido(opciones.apunte) }}
+      <div style="margin-top:8px">
+        <label class="opcion" for="apunte_esfuerzo">Esfuerzo</label>
+        {{ select_esfuerzo('apunte_esfuerzo', cfg.apunte.esfuerzo, 'el default del modelo', esfuerzos) }}
+      </div>
+    </div>
+  </div>
+  <div class="acciones" style="margin-top:14px">
+    <button type="submit" class="primario">Guardar modelos</button>
+  </div>
+</form>
+
+<div class="tarjeta">
+  <h2 style="margin-top:0">Catálogo</h2>
+  <p class="chico" style="margin-top:0">Arranca con los modelos conocidos y se actualiza con las APIs de modelos de Anthropic y de Google. Sin la clave de un proveedor (o si su API falla) se mantiene lo que había de ese proveedor.</p>
+  <table>
+    <thead><tr><th>Proveedor</th><th>Clave</th><th>Último descubrimiento</th><th>Resultado</th></tr></thead>
+    <tbody>
+    {% for p in proveedores %}
+    <tr>
+      <td class="nowrap">{{ p.nombre }}</td>
+      <td class="nowrap">{% if p.hay_clave %}<span class="estado lista">{{ p.variable }}</span>{% else %}<span class="aviso-texto">falta {{ p.variable }}</span>{% endif %}</td>
+      <td class="chico nowrap">{{ p.d.momento | fecha if p.d else 'nunca' }}</td>
+      <td>
+        {% if not p.d %}<span class="chico">Todavía no se redescubrió: están los modelos conocidos de arranque.</span>
+        {% elif p.d.ok %}<span class="estado lista">ok</span> <span class="chico">{{ p.d.cantidad }} modelos para Classmer</span>
+        {% else %}<span class="aviso-texto">No se actualizó: {{ p.d.detalle }}. Se mantuvo lo que había.</span>{% if p.d.ultimo_ok %}<div class="chico">Último que anduvo: {{ p.d.ultimo_ok | fecha }}</div>{% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <form class="linea" method="post" action="/panel/modelos/redescubrir" style="margin-top:12px">
+    <button type="submit"{% if redescubriendo %} disabled{% endif %}>Redescubrir modelos</button>
+    <span class="chico">{% if redescubriendo %}Se está redescubriendo ahora: recargá en unos segundos.{% else %}Consulta las dos APIs (tarda unos segundos). También: <code>classmer modelos --redescubrir</code>.{% endif %}</span>
+  </form>
+</div>
+
+<h2>Modelos del catálogo</h2>
+{% if catalogo or fuera %}
+<div style="overflow-x:auto">
+<table>
+  <thead><tr><th>Proveedor</th><th>Nombre</th><th>Id</th><th>Tareas</th><th>Descubierto</th><th>Visto</th><th>Presente</th><th>Elegido en</th></tr></thead>
+  <tbody>
+  {% for m in catalogo %}
+  <tr>
+    <td class="nowrap">{{ nombre_proveedor.get(m.proveedor, m.proveedor) }}</td>
+    <td>{{ m.nombre }}</td>
+    <td><code>{{ m.id }}</code></td>
+    <td class="chico">{{ m.tareas | join(', ') }}</td>
+    <td class="chico nowrap">{{ m.descubierto | fecha }}{% if m.origen == 'semilla' %} <span class="etiqueta">de arranque</span>{% endif %}</td>
+    <td class="chico nowrap">{{ m.visto | fecha if m.visto else '—' }}</td>
+    <td>{% if m.presente %}sí{% else %}<span class="aviso-texto">{{ aviso_ausente }}</span>{% endif %}</td>
+    <td class="chico">{{ m.donde | join('; ') }}</td>
+  </tr>
+  {% endfor %}
+  {% for x in fuera %}
+  <tr>
+    <td class="nowrap">—</td>
+    <td>{{ x.id }}</td>
+    <td><code>{{ x.id }}</code></td>
+    <td class="chico">{{ x.tarea }}</td>
+    <td></td><td></td>
+    <td><span class="aviso-texto">{{ aviso_fuera }}</span></td>
+    <td class="chico">{{ x.donde | join('; ') }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="vacio">El catálogo está vacío.</p>
+{% endif %}
+
+<h2>Materias con modelo propio del apunte</h2>
+{% if propias %}
+<table>
+  <thead><tr><th>Materia</th><th>Modelo</th><th>Esfuerzo</th></tr></thead>
+  <tbody>
+  {% for p in propias %}
+  <tr>
+    <td><a href="/panel/materias/{{ p.m.id }}">{{ p.m.nombre }}</a>{% if not p.m.activa %} <span class="chico">(inactiva)</span>{% endif %}</td>
+    <td><code>{{ p.modelo }}</code></td>
+    <td>{{ p.esfuerzo or 'por defecto' }}{% if not p.m.apunte.esfuerzo %} <span class="chico">(el global)</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vacio">Ninguna: todas usan el modelo global del apunte. Se cambia en la página de cada materia.</p>
+{% endif %}
+{% endblock %}

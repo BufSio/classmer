@@ -1,0 +1,386 @@
+{% extends "base.html" %}
+{% block titulo %}Importar clase{% endblock %}
+{% block cabeza %}
+<style>
+input[type=datetime-local] { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--borde);
+                             border-radius: 6px; background: var(--panel); color: var(--texto); }
+input[type=file] { max-width: 100%; font: inherit; font-size: 14px; }
+fieldset { border: none; margin: 0; padding: 0; min-width: 0; }
+.con-error { outline: 2px solid var(--error); outline-offset: 4px; border-radius: 6px; }
+[hidden] { display: none !important; }
+.progreso { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.progreso progress { width: 280px; max-width: 100%; }
+.candidatos { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.candidato { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.candidato button { font-family: Consolas, "Cascadia Mono", monospace; }
+.candidato button.elegido { border-color: var(--acento); background: var(--acento-suave); color: var(--acento); }
+.lista-fotos { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.info { margin-top: 6px; }
+</style>
+{% endblock %}
+{% block contenido %}
+<p class="chico"><a href="/panel/clases">← Clases</a></p>
+<h1>Importar clase</h1>
+<p class="sub">Una clase que no grabaste: el audio que te mandó alguien (WhatsApp, la grabadora, un video), con fotos
+  y material opcionales. Primero se sube y se analiza el audio, para proponer cuándo empezó; después se importa y sigue
+  el pipeline de siempre.</p>
+
+<form id="form-importar" class="tarjeta" novalidate>
+  <fieldset id="campos">
+  <div class="campos">
+    <label for="audio">Audio<span class="ayuda">El de WhatsApp (.opus, .m4a), el de la grabadora, un video .mp4…: lo que lea ffmpeg, hasta 2 GB.</span></label>
+    <div data-campo="audio">
+      <input type="file" id="audio" accept="{{ acepta_audio }}">
+      <div id="progreso" class="progreso" hidden><progress id="barra" max="100" value="0"></progress><span id="progreso-texto" class="chico"></span></div>
+      <div id="audio-info" class="chico info"></div>
+    </div>
+
+    <label for="fotos">Fotos<span class="ayuda">Del pizarrón (opcional, hasta {{ max_foto_mb }} MB cada una). Se ubican por su hora EXIF; las que no la tienen van al final, sin minuto.</span></label>
+    <div data-campo="fotos">
+      <input type="file" id="fotos" multiple accept="image/*">
+      <div id="fotos-info" class="chico info"></div>
+    </div>
+
+    <label for="material">Material<span class="ayuda">Slides o notas del profe ({{ tipos_adjunto }}, opcional, hasta {{ max_adjunto_mb }} MB cada uno): entran como adjuntos de la clase.</span></label>
+    <div data-campo="material">
+      <input type="file" id="material" multiple accept="{{ acepta_adjuntos }}">
+    </div>
+
+    <label for="materia_id">Materia<span class="ayuda">En Auto la decide la IA con el transcript (si duda, la clase queda esperando que la elijas).</span></label>
+    <div data-campo="materia_id">
+      <select id="materia_id">
+        <option value="auto">Auto (IA)</option>
+        {% for m in materias_form %}<option value="{{ m.id }}">{{ m.nombre }}</option>{% endfor %}
+      </select>
+    </div>
+
+    <label for="tipo_clase">Tipo de clase</label>
+    <div data-campo="tipo_clase"><select id="tipo_clase"></select></div>
+
+    <label for="numero_clase">Número de clase<span class="ayuda" id="numero-ayuda"></span></label>
+    <div data-campo="numero_clase"><input type="number" id="numero_clase" min="0" step="1" style="width:110px"></div>
+
+    <label for="inicio">Inicio<span class="ayuda">Fecha y hora en que empezó la grabación, en hora de Buenos Aires. La propone el server al analizar el audio; se puede corregir.</span></label>
+    <div data-campo="inicio">
+      <input type="datetime-local" id="inicio" step="1">
+      <div id="candidatos" class="candidatos"></div>
+      <div id="avisos" class="info"></div>
+    </div>
+  </div>
+  </fieldset>
+  <div id="error" class="msg error" style="margin:14px 0 0" hidden></div>
+  <div class="acciones" style="margin-top:14px">
+    <button type="submit" class="primario" id="importar" disabled>Importar y procesar</button>
+    <button type="button" id="cancelar">Cancelar</button>
+    <span class="chico">Se genera un apunte nuevo: antes de importar te dice cuánto cuesta.</span>
+  </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const DATOS = {{ datos_js | tojson }};
+  const $ = (id) => document.getElementById(id);
+  const form = $('form-importar'), campos = $('campos');
+  const audio = $('audio'), fotos = $('fotos'), material = $('material');
+  const materia = $('materia_id'), tipo = $('tipo_clase'), numero = $('numero_clase'), inicio = $('inicio');
+  const boton = $('importar');
+  let token = null;          // el análisis que está en el área temporal del server
+  let analisis = null;       // la última respuesta de Analizar
+  let pedido = null;         // el XMLHttpRequest en curso (Analizar o Importar)
+  let inicioTocado = false;  // El usuario tocó un candidato o escribió el inicio: no se pisa al volver a analizar
+  let importado = false;
+  let campoError = null;
+
+  // --- formato ---
+  function tamano(n) {
+    if (n < 1024) return n + ' B';
+    let v = n, unidad = 'B';
+    for (const u of ['KB', 'MB', 'GB']) { v /= 1024; unidad = u; if (v < 1024) break; }
+    return (v < 10 ? v.toFixed(1) : String(Math.round(v))).replace('.', ',') + ' ' + unidad;
+  }
+  function duracion(ms) {
+    if (ms < 60000) return Math.round(ms / 1000) + ' s';
+    const m = Math.round(ms / 60000);
+    return m >= 60 ? Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min' : m + ' min';
+  }
+  function hhmmss(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((x) => String(x).padStart(2, '0')).join(':');
+  }
+  function el(tag, clase, ...hijos) {
+    const e = document.createElement(tag);
+    if (clase) e.className = clase;
+    e.append(...hijos);
+    return e;
+  }
+  function instante(local) {  // el datetime-local (hora de Buenos Aires) como ms
+    return analisis && local ? Date.parse(local + analisis.offset_zona) : NaN;
+  }
+
+  // --- mensajes y estado ---
+  function error(texto, campo) {
+    const caja = $('error');
+    caja.textContent = texto || '';
+    caja.hidden = !texto;
+    campoError = texto ? (campo || null) : null;
+    document.querySelectorAll('.con-error').forEach((e) => e.classList.remove('con-error'));
+    const marco = campoError && document.querySelector('[data-campo="' + campoError + '"]');
+    if (marco) marco.classList.add('con-error');
+  }
+  function progreso(visible, fraccion, texto) {
+    $('progreso').hidden = !visible;
+    const barra = $('barra');
+    if (fraccion == null) barra.removeAttribute('value'); else barra.value = Math.round(100 * fraccion);
+    $('progreso-texto').textContent = texto || '';
+  }
+  function actualizarBoton() { boton.disabled = !token || !!pedido; }
+  function soltar() {  // borra el análisis del server (cambió el audio, Cancelar)
+    if (!token) return;
+    fetch('/panel/importar/' + token + '/cancelar', { method: 'POST', keepalive: true }).catch(() => {});
+    token = null;
+    actualizarBoton();
+  }
+  function limpiar() {
+    analisis = null;
+    ['audio-info', 'fotos-info', 'candidatos', 'avisos'].forEach((id) => $(id).replaceChildren());
+    if (!inicioTocado) inicio.value = '';
+    actualizarBoton();
+  }
+
+  // --- materia, tipo y número ---
+  function alCambiarMateria() {
+    const m = DATOS.materias.find((x) => x.id === materia.value) || null;
+    const tipos = m ? m.tipos : DATOS.tipos_auto;
+    const antes = tipo.value;
+    tipo.replaceChildren();
+    if (!tipos.length) tipo.add(new Option('—', ''));
+    tipos.forEach((t) => tipo.add(new Option(t.texto, t.valor)));
+    if (tipos.some((t) => t.valor === antes)) tipo.value = antes;
+    numero.disabled = !m;
+    numero.value = m ? m.proximo : '';
+    numero.placeholder = m ? '' : 'lo pone el server';
+    $('numero-ayuda').textContent = m
+      ? 'El próximo de ' + m.nombre + ' es el ' + m.proximo + '; se puede cambiar.'
+      : 'En Auto lo pone el server cuando se sepa la materia.';
+  }
+  materia.addEventListener('change', alCambiarMateria);
+  alCambiarMateria();
+
+  // --- subir (con progreso: el audio puede pesar 1 GB) ---
+  function enviar(url, datos, alSubir, alTerminar) {
+    if (pedido) pedido.abort();
+    const xhr = new XMLHttpRequest();
+    pedido = xhr;
+    actualizarBoton();
+    xhr.open('POST', url);
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) alSubir(ev.loaded, ev.total); };
+    xhr.upload.onload = () => alSubir(-1, -1);  // ya subió: ahora trabaja el server
+    xhr.onload = () => {
+      pedido = null;
+      actualizarBoton();
+      alTerminar(xhr.status, xhr.response || { detail: 'Respuesta inválida del server (' + xhr.status + ').' });
+    };
+    xhr.onerror = () => {
+      pedido = null;
+      actualizarBoton();
+      alTerminar(0, { detail: 'Se cortó la conexión con el server: ¿sigue andando?' });
+    };
+    xhr.onabort = () => { if (pedido === xhr) { pedido = null; actualizarBoton(); } };
+    xhr.send(datos);
+  }
+
+  // --- Analizar ---
+  function analizar(conAudio) {
+    const archivo = audio.files[0];
+    if (!archivo) return;
+    if (archivo.size > DATOS.max_audio) {
+      if (pedido) pedido.abort();
+      soltar();
+      limpiar();
+      error(archivo.name + ' pesa ' + tamano(archivo.size) + ': el máximo para importar es 2 GB.', 'audio');
+      return;
+    }
+    const datos = new FormData();
+    if (conAudio) {
+      soltar();  // el análisis anterior era de otro audio
+    } else {
+      datos.append('token', token);  // antes que los archivos: el server lo necesita para guardarlos
+    }
+    if (conAudio) {
+      datos.append('audio_modificado', String(archivo.lastModified));
+      datos.append('audio', archivo, archivo.name);
+    }
+    const grandes = [];
+    Array.from(fotos.files).slice(0, DATOS.max_fotos).forEach((f) => {
+      if (f.size > DATOS.max_foto) grandes.push(f.name); else datos.append('fotos', f, f.name);
+    });
+    $('audio-info').textContent = conAudio ? '' : 'Volviendo a analizar con las fotos…';
+    enviar('/panel/importar/analizar', datos, (subido, total) => {
+      if (subido < 0) progreso(true, null, conAudio ? 'Analizando el audio…' : 'Analizando las fotos…');
+      else progreso(true, subido / total, 'Subiendo ' + Math.floor(100 * subido / total) + '% (' + tamano(subido)
+                    + ' de ' + tamano(total) + ')');
+    }, (status, r) => {
+      progreso(false);
+      if (status === 200) {
+        token = r.token;
+        mostrar(r, grandes);
+        if (['audio', 'fotos', 'token'].includes(campoError)) error('');
+        actualizarBoton();
+        return;
+      }
+      if (!conAudio && r.campo === 'token') { token = null; analizar(true); return; }  // venció: se sube todo de nuevo
+      if (conAudio || r.campo === 'audio') { token = null; limpiar(); }
+      error(r.detail || 'Error ' + status + '.', r.campo || 'audio');
+    });
+  }
+  audio.addEventListener('change', () => {
+    error('');
+    if (audio.files[0]) { analizar(true); return; }
+    if (pedido) pedido.abort();
+    soltar();
+    progreso(false);
+    limpiar();
+  });
+  fotos.addEventListener('change', () => { if (audio.files[0]) analizar(!token); });
+
+  function mostrar(r, grandes) {
+    analisis = r;
+    const a = r.audio;
+    const info = $('audio-info');
+    info.replaceChildren(a.nombre + ' · ' + duracion(a.duracion_ms) + ' · ' + tamano(a.bytes)
+                         + (a.codec ? ' · ' + a.codec : ''));
+    if (!a.reproducible) {
+      info.append(el('div', 'aviso-texto', 'El navegador no reproduce este formato: al procesarla se arma una copia para el reproductor del panel.'));
+    }
+    if (!inicioTocado || !inicio.value) { inicio.value = r.inicio_local; inicioTocado = false; }
+
+    const caja = $('candidatos');
+    caja.replaceChildren();
+    r.candidatos_inicio.forEach((c) => {
+      const b = el('button', 'mini', c.texto);
+      b.type = 'button';
+      b.dataset.inicio = c.inicio_local;
+      b.title = 'Usar este inicio';
+      b.addEventListener('click', () => { inicio.value = c.inicio_local; inicioTocado = true; alCambiarInicio(); });
+      caja.append(el('div', 'candidato', b, el('span', 'chico', c.etiqueta + (c.elegido ? ' (el propuesto)' : ''))));
+    });
+    const avisos = $('avisos');
+    avisos.replaceChildren(...r.avisos.map((t) => el('div', 'aviso-texto', t)));
+    if (grandes.length) {
+      avisos.append(el('div', 'error-texto', 'No se mandaron (pesan más de ' + tamano(DATOS.max_foto) + '): ' + grandes.join(', ') + '.'));
+    }
+    alCambiarInicio();
+  }
+
+  // Con el inicio que está en el campo: qué candidato es y dónde caen las fotos.
+  function alCambiarInicio() {
+    const actual = instante(inicio.value);
+    document.querySelectorAll('#candidatos button').forEach((b) => {
+      b.classList.toggle('elegido', Math.abs(instante(b.dataset.inicio) - actual) < 60000);
+    });
+    const caja = $('fotos-info');
+    caja.replaceChildren();
+    if (!analisis) return;
+    const r = analisis, dur = r.audio.duracion_ms, margen = r.margen_ms;
+    if (!r.fotos.length && !r.fotos_ilegibles.length) { caja.textContent = 'Sin fotos.'; return; }
+    let conHora = 0, sinHora = 0, fuera = 0;
+    const lista = el('ul', 'lista-fotos');
+    r.fotos.forEach((f) => {
+      let detalle;
+      if (!f.hora) {
+        sinHora++;
+        detalle = 'sin hora EXIF: va al final, sin minuto';
+      } else {
+        conHora++;
+        const offset = Date.parse(f.hora) - actual;
+        if (isNaN(offset)) detalle = f.hora_texto;
+        else if (offset < -margen || offset > dur + margen) {
+          fuera++;
+          detalle = f.hora_texto + ': fuera de la grabación con este inicio (queda al ' + (offset < 0 ? 'principio' : 'final') + ')';
+        } else detalle = f.hora_texto + ' → minuto ' + hhmmss(Math.min(Math.max(offset, 0), dur));
+      }
+      lista.append(el('li', '', f.nombre + ': ' + detalle));
+    });
+    r.fotos_ilegibles.forEach((f) => lista.append(el('li', 'error-texto', f.nombre + ': no se pudo leer (' + f.motivo + ')')));
+    const partes = [conHora + ' con hora'];
+    if (fuera) partes.push(fuera + ' fuera de la grabación');
+    partes.push(sinHora + ' sin hora');
+    if (r.fotos_ilegibles.length) partes.push(r.fotos_ilegibles.length + ' ilegible' + (r.fotos_ilegibles.length > 1 ? 's' : ''));
+    const total = r.fotos.length + r.fotos_ilegibles.length;
+    caja.append(el('div', '', total + ' foto' + (total > 1 ? 's' : '') + ': ' + partes.join(' · ')), lista);
+  }
+  inicio.addEventListener('input', () => { inicioTocado = true; alCambiarInicio(); });
+
+  // --- Importar y procesar ---
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    if (pedido) { error('Esperá a que termine de subirse y analizarse el audio.'); return; }
+    if (!token) { error('Elegí el audio de la clase y esperá a que se analice.', 'audio'); return; }
+    if (!inicio.value) { error('Poné el inicio de la clase (fecha y hora).', 'inicio'); return; }
+    const archivos = Array.from(material.files);
+    const grandes = archivos.filter((f) => f.size > DATOS.max_material).map((f) => f.name);
+    if (grandes.length) {
+      error('Pesan más de ' + tamano(DATOS.max_material) + ': ' + grandes.join(', ') + '. Sacalos del material.', 'material');
+      return;
+    }
+    if (archivos.length > DATOS.max_materiales) {
+      error('Hasta ' + DATOS.max_materiales + ' archivos de material por vez: el resto se adjunta después desde la clase.', 'material');
+      return;
+    }
+    if (!confirm(DATOS.confirmacion)) return;
+    const datos = new FormData();
+    datos.append('token', token);  // antes que el material
+    datos.append('materia_id', materia.value);
+    datos.append('tipo_clase', tipo.value);
+    if (!numero.disabled) datos.append('numero_clase', numero.value);
+    datos.append('inicio', inicio.value);
+    archivos.forEach((f) => datos.append('material', f, f.name));
+    error('');
+    campos.disabled = true;
+    // Cancelar sirve mientras sube el material (cortar la subida no crea nada). Cuando el server ya tiene
+    // el pedido, la clase se crea igual: el botón se apaga para que no parezca que se canceló.
+    const cancelar = $('cancelar');
+    if (!archivos.length) cancelar.disabled = true;
+    enviar('/panel/importar', datos, (subido, total) => {
+      if (subido < 0 || !archivos.length) {
+        cancelar.disabled = true;
+        progreso(true, null, 'Importando… (ya no se puede cancelar)');
+      } else progreso(true, subido / total, 'Subiendo el material ' + Math.floor(100 * subido / total) + '%');
+    }, (status, r) => {
+      if (status === 201) { importado = true; token = null; location.href = r.url; return; }
+      campos.disabled = false;
+      cancelar.disabled = false;
+      progreso(false);
+      if (r.campo === 'token' && audio.files[0]) {
+        error((r.detail || '') + ' Lo vuelvo a analizar: después tocá Importar y procesar de nuevo.', 'audio');
+        token = null;
+        analizar(true);
+        return;
+      }
+      if (r.campo === 'fotos' && token && audio.files[0]) {  // un análisis de las fotos que se cortó
+        error((r.detail || '') + ' Las vuelvo a analizar: después tocá Importar y procesar de nuevo.', 'fotos');
+        analizar(false);
+        return;
+      }
+      error(r.detail || 'Error ' + status + '.', r.campo);
+    });
+  });
+
+  // --- Cancelar (o irse sin importar): el server borra lo que se subió ---
+  $('cancelar').addEventListener('click', () => {
+    if (pedido) pedido.abort();
+    soltar();
+    location.href = '/panel/clases';
+  });
+  window.addEventListener('pagehide', () => {
+    if (token && !importado) navigator.sendBeacon('/panel/importar/' + token + '/cancelar');
+  });
+  window.addEventListener('pageshow', (ev) => {
+    if (ev.persisted && audio.files[0] && !importado) { token = null; analizar(true); }  // volvió con "atrás"
+  });
+})();
+</script>
+{% endblock %}

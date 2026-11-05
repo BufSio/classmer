@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_modelos.html" import select_modelo, select_esfuerzo, aviso_elegido %}
+{% block titulo %}{{ 'Nueva materia' if nueva else v.nombre }}{% endblock %}
+{% block contenido %}
+<p class="chico"><a href="/panel/materias">← Materias</a></p>
+<h1>{{ 'Nueva materia' if nueva else v.nombre }}</h1>
+<p class="sub">{% if nueva %}Se agrega al final de <code>materias</code> en config.yaml.{% else %}Los cambios se escriben en config.yaml (sólo las claves que cambian) y se aplican sin reiniciar.{% endif %}</p>
+
+<form method="post" action="{{ '/panel/materias/nueva' if nueva else '/panel/materias/' ~ v.id }}" class="tarjeta">
+  <div class="campos">
+    <label for="id">Id<span class="ayuda">minúsculas, números, - y _. No se puede cambiar después.</span></label>
+    <div>{% if nueva %}<input type="text" id="id" name="id" value="{{ v.id or '' }}" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">{% else %}<code>{{ v.id }}</code>{% endif %}</div>
+
+    <label for="nombre">Nombre</label>
+    <input type="text" id="nombre" name="nombre" value="{{ v.nombre or '' }}" required>
+
+    <label for="activa">Activa<span class="ayuda">Las inactivas no aparecen en la app.</span></label>
+    <div><input type="checkbox" id="activa" name="activa" {% if v.activa %}checked{% endif %}></div>
+
+    <label for="carpeta">Carpeta<span class="ayuda">Acepta %USERPROFILE%. Si no existe, no se publica afuera.</span></label>
+    <input type="text" id="carpeta" name="carpeta" value="{{ v.carpeta or '' }}" placeholder="%USERPROFILE%\Documents\Claude\Projects\…">
+
+    <label for="carpeta_clases">Carpeta de clases<span class="ayuda">Subcarpeta donde se publican los apuntes. Vacío = Clases-Classmer.</span></label>
+    <input type="text" id="carpeta_clases" name="carpeta_clases" value="{{ v.carpeta_clases or '' }}" placeholder="Clases-Classmer">
+
+    <label for="perfil">Perfil<span class="ayuda">Archivo dentro de la carpeta. Si no existe, se usa PROMPT-AGENTE.md.</span></label>
+    <input type="text" id="perfil" name="perfil" value="{{ v.perfil or '' }}" placeholder="PROMPT-AGENTE.md">
+
+    <label for="titulo_regex">Regla: título del evento<span class="ayuda">Regex sin distinguir mayúsculas, p. ej. ^An[aá]lisis Matem[aá]tico\b</span></label>
+    <input type="text" id="titulo_regex" name="titulo_regex" value="{{ v.calendario.titulo_regex or '' }}">
+
+    <label for="calendario">Regla: calendario<span class="ayuda">Nombre visible del calendario del celu. Si van las dos reglas, tienen que coincidir las dos.</span></label>
+    <input type="text" id="calendario" name="calendario" value="{{ v.calendario.calendario or '' }}">
+
+    <label for="tipos_clase">Tipos de clase<span class="ayuda">Separados por coma: teorica, practica</span></label>
+    <input type="text" id="tipos_clase" name="tipos_clase" value="{{ (v.tipos_clase or []) | join(', ') }}">
+
+    <label>Número de clase<span class="ayuda">{% if nueva %}Con qué número empieza la numeración.{% else %}Cambiá uno de los dos. Hay {{ contadas }} clase{{ '' if contadas == 1 else 's' }} que no terminaron en error.{% endif %}</span></label>
+    <div class="acciones">
+      <span>Inicial <input type="number" name="numero_clase_inicial" value="{{ v.numero_clase_inicial }}" style="width:90px"></span>
+      {% if not nueva %}
+      <span>Próxima clase <input type="number" min="1" name="proximo_numero" value="{{ proximo if proximo is not none else '' }}" style="width:90px"></span>
+      <input type="hidden" name="proximo_original" value="{{ proximo if proximo is not none else '' }}">
+      {% endif %}
+    </div>
+
+    <label>Modelo del apunte<span class="ayuda">Qué modelo de Claude escribe el apunte de esta materia. El global se cambia en <a href="/panel/modelos">Modelos</a>.</span></label>
+    <div>
+      <div><label class="opcion"><input type="radio" name="apunte_origen" value="heredar" id="apunte_heredar"{% if not v.apunte %} checked{% endif %}>
+        Heredar del global ({{ apunte_global }}, esfuerzo {{ esfuerzo_global or 'por defecto' }})</label></div>
+      <div style="margin-top:6px"><label class="opcion"><input type="radio" name="apunte_origen" value="propio" id="apunte_propio"{% if v.apunte %} checked{% endif %}> Propio:</label></div>
+      <div class="acciones" style="margin:6px 0 0 22px" id="apunte_campos">
+        {{ select_modelo('apunte_modelo', opciones_apunte) }}
+        <span><label class="opcion" for="apunte_esfuerzo">esfuerzo</label>
+        {{ select_esfuerzo('apunte_esfuerzo', v.apunte.esfuerzo if v.apunte else None, 'el del global (' ~ (esfuerzo_global or 'por defecto') ~ ')', esfuerzos) }}</span>
+      </div>
+      {% if v.apunte %}<div style="margin-left:22px">{{ aviso_elegido(opciones_apunte) }}</div>{% endif %}
+    </div>
+
+    <label>Tipo de revisión<span class="ayuda">Antes del apunte se concilian el reloj y el celu y se limpia el transcript. Vale para todas las clases de la materia.</span></label>
+    {% set tipo_revision = v.revision if 'revision' in v else 'automatica' %}
+    <div>
+      {% for valor, nombre, ayuda in [
+        ('automatica', 'Automática', 'Las dudas que quedan toman la propuesta del modelo y el apunte sale solo.'),
+        ('asistida', 'Asistida', 'Revisás las dudas en la página de la clase; el apunte arranca con "Listo".'),
+        ('apagada', 'Apagada', 'Sin revisión: va el crudo y el apunte sale directo. El celu sólo cubre donde el principal no tiene audio.')] %}
+      <div{% if not loop.first %} style="margin-top:6px"{% endif %}><label class="opcion"><input type="radio" name="revision" value="{{ valor }}" id="revision_{{ valor }}"{% if tipo_revision == valor %} checked{% endif %}>
+        {{ nombre }}<span class="ayuda" style="margin-left:22px">{{ ayuda }}</span></label></div>
+      {% endfor %}
+    </div>
+
+    <label for="profesor">Profesor<span class="ayuda">Cómo aparece el profe en el transcript revisado (p. ej. Laura Inés Gómez). Vacío: "Profe".</span></label>
+    <input type="text" id="profesor" name="profesor" value="{{ v.profesor or '' }}" placeholder="Profe">
+
+    <label for="estilo">Estilo propio<span class="ayuda">Capa 3 del prompt: se suma al estilo global sólo en esta materia.</span></label>
+    <textarea id="estilo" name="estilo" rows="6">{{ v.estilo or '' }}</textarea>
+  </div>
+  <div class="acciones" style="margin-top:18px">
+    <button type="submit" class="primario">{{ 'Agregar materia' if nueva else 'Guardar' }}</button>
+    <a href="/panel/materias">Cancelar</a>
+    {% if not nueva %}<a href="/panel/pendientes?materia={{ v.id }}" style="margin-left:auto">Ver pendientes →</a>{% endif %}
+  </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Elegir un modelo o un esfuerzo propio marca "Propio" (si no, se ignorarían al guardar).
+document.querySelectorAll('#apunte_campos select').forEach(function (s) {
+  s.addEventListener('change', function () { document.getElementById('apunte_propio').checked = true; });
+});
+</script>
+{% endblock %}

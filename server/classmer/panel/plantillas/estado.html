@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block titulo %}Estado{% endblock %}
+{% block cabeza %}<meta http-equiv="refresh" content="15">{% endblock %}
+{% block contenido %}
+<h1>Estado</h1>
+<p class="sub">Cola de trabajos, errores y log del server. Se actualiza sola cada 15 segundos.</p>
+
+<div class="grilla" style="margin-bottom:8px">
+  <div class="tarjeta">
+    <h3 style="margin-top:0">Worker</h3>
+    {% if worker %}<span class="estado lista">andando</span>{% else %}<span class="estado error">apagado</span> <span class="chico">(este server no procesa jobs)</span>{% endif %}
+    <div class="chico" style="margin-top:6px">{{ activos | selectattr('estado', 'equalto', 'corriendo') | list | length }} corriendo · {{ activos | selectattr('estado', 'equalto', 'pendiente') | list | length }} en cola</div>
+  </div>
+  <div class="tarjeta">
+    <h3 style="margin-top:0">Configuración</h3>
+    {% if config_viva.error %}<span class="estado error">con error</span><div class="error-texto" style="margin-top:6px">{{ config_viva.error }}</div><div class="chico">Se sigue usando la versión anterior.</div>
+    {% else %}<span class="estado lista">al día</span>{% endif %}
+    {% if config_viva.recargada %}<div class="chico" style="margin-top:6px">Recargada: {{ config_viva.recargada | fecha }}</div>{% endif %}
+    {% if config_viva.pendientes_reinicio %}<div class="aviso-texto">Para aplicar {{ config_viva.pendientes_reinicio | join(', ') }} hay que reiniciar el server.</div>{% endif %}
+  </div>
+  <div class="tarjeta">
+    <h3 style="margin-top:0">Esperando que elijas</h3>
+    {% for s in esperando %}
+    <div><a href="/panel/clases/{{ s.id }}">{{ s.inicio | fecha }}</a> <span class="chico">{{ s.error | truncate(80) if s.error else '' }}</span></div>
+    {% else %}<span class="vacio">Nada.</span>{% endfor %}
+  </div>
+  <div class="tarjeta">
+    <h3 style="margin-top:0">Facturación de Claude</h3>
+    <div>{{ f.modo_texto }}</div>
+    {% for m in f.medios %}
+    <div class="chico" style="margin-top:4px">{{ m.etiqueta }}:
+      {% if m.e.ok %}<span class="estado lista">ok</span>{% elif m.e.estado == 'sin_clave' %}<span class="aviso-texto">{{ m.texto }}</span>{% else %}<span class="error-texto">{{ m.texto }}</span>{% endif %}
+    </div>
+    {% endfor %}
+    {% if f.aviso_sin_clave %}<div class="aviso-texto" style="margin-top:6px">{{ f.aviso_sin_clave }}.</div>{% endif %}
+    <div class="chico" style="margin-top:6px"><a href="/panel/modelos">Modelos y facturación →</a></div>
+  </div>
+</div>
+
+{% if avisos_pub %}
+<div class="msg aviso">
+  <strong>Carpetas publicadas que no se pudieron archivar</strong>
+  {% for x in avisos_pub %}
+  <div style="margin-top:4px"><a href="/panel/clases/{{ x.a.sesion_id }}">{{ x.titulo or (x.inicio | fecha) or x.a.sesion_id[:8] }}</a>: {{ x.a.aviso or 'no se pudo archivar' }} <span class="chico">({{ x.a.ruta }})</span></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h2>Cola de jobs</h2>
+{% if activos %}
+<table>
+  <thead><tr><th class="num">Job</th><th>Etapa</th><th>Sesión</th><th>Estado</th><th class="num">Intentos</th><th>Cuándo</th><th>Pago</th><th>Costo</th><th>Último error</th></tr></thead>
+  <tbody>
+  {% for j in activos %}
+  <tr>
+    <td class="num">{{ j.id }}</td>
+    <td>{{ j.tipo }}{% if j.args and j.args != '{}' %} <span class="chico">{{ j.args }}</span>{% endif %}</td>
+    <td class="chico">{% if j.sesion_id %}<a href="/panel/clases/{{ j.sesion_id }}">{{ j.sesion_id[:8] }}</a>{% endif %}</td>
+    <td><span class="estado {{ j.estado }}">{{ j.estado }}</span></td>
+    <td class="num">{{ j.intentos }}/{{ j.max_intentos }}</td>
+    <td class="chico nowrap">{% if j.estado == 'corriendo' %}desde {{ j.actualizado | hora }}{% elif j.run_after > ahora %}a las {{ j.run_after | hora }}{% else %}ya{% endif %}</td>
+    <td class="chico nowrap">{{ j.facturacion | pago }}</td>
+    <td class="chico">{{ j.costo | costo(j.facturacion) }}</td>
+    <td>{% if j.error %}<span class="{{ 'aviso-texto' if j.estado == 'pendiente' else 'error-texto' }}">{{ j.error | truncate(200) }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vacio">La cola está vacía.</p>
+{% endif %}
+
+{% if con_claude %}
+<h2>Últimos trabajos con Claude</h2>
+<table>
+  <thead><tr><th class="num">Job</th><th>Etapa</th><th>Sesión</th><th>Estado</th><th>Cuándo</th><th>Pago</th><th>Costo</th></tr></thead>
+  <tbody>
+  {% for j in con_claude %}
+  <tr>
+    <td class="num">{{ j.id }}</td>
+    <td>{{ j.tipo }}</td>
+    <td class="chico">{% if j.sesion_id %}<a href="/panel/clases/{{ j.sesion_id }}">{{ j.sesion_id[:8] }}</a>{% endif %}</td>
+    <td><span class="estado {{ j.estado }}">{{ j.estado }}</span></td>
+    <td class="chico nowrap">{{ j.actualizado | hora }}</td>
+    <td class="chico nowrap">{{ j.facturacion | pago }}</td>
+    <td class="chico">{{ j.costo | costo(j.facturacion) }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Errores recientes</h2>
+{% if errores_sesiones %}
+<h3>Clases en error</h3>
+<table>
+  <thead><tr><th>Fecha</th><th>Materia</th><th>Etapa</th><th>Error</th></tr></thead>
+  <tbody>
+  {% for s in errores_sesiones %}
+  <tr>
+    <td class="nowrap"><a href="/panel/clases/{{ s.id }}">{{ s.inicio | fecha }}</a></td>
+    <td>{{ nombre_materia(s.materia_id) }}</td>
+    <td class="chico">{{ s.etapa or '' }}</td>
+    <td class="error-texto">{{ s.error or '' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if errores_jobs %}
+<h3>Jobs que fallaron</h3>
+<table>
+  <thead><tr><th class="num">Job</th><th>Etapa</th><th>Sesión</th><th>Cuándo</th><th>Error</th></tr></thead>
+  <tbody>
+  {% for j in errores_jobs %}
+  <tr>
+    <td class="num">{{ j.id }}</td>
+    <td>{{ j.tipo }}</td>
+    <td class="chico">{% if j.sesion_id %}<a href="/panel/clases/{{ j.sesion_id }}">{{ j.sesion_id[:8] }}</a>{% endif %}</td>
+    <td class="chico nowrap">{{ j.actualizado | hora }}</td>
+    <td class="error-texto">{{ j.error | truncate(300) if j.error else '' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if not errores_sesiones and not errores_jobs %}<p class="vacio">Sin errores.</p>{% endif %}
+
+<h2>Log del server <span class="chico">({{ log_ruta }})</span></h2>
+{% if log %}<pre class="desplazable" style="max-height:520px">{{ log | join('\n') }}</pre>
+{% else %}<p class="vacio">El log está vacío o no existe.</p>{% endif %}
+{% endblock %}

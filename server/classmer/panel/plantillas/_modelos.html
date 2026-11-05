@@ -1,0 +1,35 @@
+{#- Selects de modelos y de esfuerzo (Modelos y materia). El modelo nunca se escribe a mano: sólo
+    se elige de las opciones que arma `modelos.opciones_tarea` (el catálogo + el elegido actual). -#}
+
+{% macro opcion(o) -%}
+<option value="{{ o.id }}"{% if o.elegido %} selected{% endif %}>{{ o.nombre }}{% if o.nombre != o.id %} ({{ o.id }}){% endif %}{% if o.aviso %} · {{ o.aviso }}{% endif %}</option>
+{%- endmacro %}
+
+{% macro aviso_elegido(opciones) -%}
+{%- set elegida = opciones | selectattr('elegido') | first -%}
+{%- if elegida and elegida.aviso %} <span class="aviso-texto">Ojo: el elegido ({{ elegida.id }}) {{ elegida.aviso }}.</span>{% endif -%}
+{%- endmacro %}
+
+{% macro select_modelo(nombre, opciones, grupos=None, id=None, sin_elegido='(ninguno fijo: el default)') -%}
+<select name="{{ nombre }}" id="{{ id or nombre }}">
+{#- Sin modelo elegido (p. ej. `apunte.modelo: null`): una opción vacía, así el navegador no manda
+    la primera de la lista como si se hubiera elegido. -#}
+{%- if not (opciones | selectattr('elegido') | first) %}
+  <option value="" selected>{{ sin_elegido }}</option>
+{%- endif %}
+{%- if grupos %}
+  {%- for etiqueta, lista in grupos %}
+  <optgroup label="{{ etiqueta }}">{% for o in lista %}{{ opcion(o) }}{% endfor %}</optgroup>
+  {%- endfor %}
+{%- else %}
+  {%- for o in opciones %}{{ opcion(o) }}{% endfor %}
+{%- endif %}
+</select>
+{%- endmacro %}
+
+{% macro select_esfuerzo(nombre, actual, vacio, esfuerzos, id=None) -%}
+<select name="{{ nombre }}" id="{{ id or nombre }}">
+  <option value=""{% if not actual %} selected{% endif %}>{{ vacio }}</option>
+  {%- for e in esfuerzos %}<option value="{{ e }}"{% if actual == e %} selected{% endif %}>{{ e }}</option>{% endfor %}
+</select>
+{%- endmacro %}

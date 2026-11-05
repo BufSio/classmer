@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block titulo %}Clases{% endblock %}
+{% block cabeza %}<meta http-equiv="refresh" content="20">{% endblock %}
+{% block contenido %}
+<div class="acciones" style="justify-content:space-between">
+  <h1>Clases</h1>
+  <a class="boton primario" href="/panel/importar">Importar clase</a>
+</div>
+<p class="sub">Todas las grabaciones, de la más nueva a la más vieja. Se actualiza sola cada 20 segundos.</p>
+
+<form class="linea" method="get" action="/panel/clases" style="margin-bottom:14px">
+  <select name="materia">
+    <option value="">Todas las materias</option>
+    {% for m in cfg.materias %}
+    <option value="{{ m.id }}" {% if filtro_materia == m.id %}selected{% endif %}>{{ m.nombre }}{% if not m.activa %} (inactiva){% endif %}</option>
+    {% endfor %}
+    <option value="auto" {% if filtro_materia == 'auto' %}selected{% endif %}>Auto (sin materia)</option>
+  </select>
+  <select name="estado">
+    <option value="">Todos los estados</option>
+    {% for e in estados %}<option value="{{ e }}" {% if filtro_estado == e %}selected{% endif %}>{{ e }}</option>{% endfor %}
+  </select>
+  <button type="submit">Filtrar</button>
+</form>
+
+{% if clases %}
+<table>
+  <thead><tr>
+    <th>Fecha</th><th>Materia</th><th class="num">N.º</th><th>Tipo</th><th>Estado</th><th>Etapa</th><th>Progreso</th><th>Título / error</th>
+  </tr></thead>
+  <tbody>
+  {% for c in clases %}
+  <tr>
+    <td class="nowrap"><a href="/panel/clases/{{ c.id }}">{{ c.inicio | fecha }}</a><div class="chico">{{ c.duracion_ms | duracion }}{% if c.importada %} <span class="etiqueta" title="No la grabó la app: se importó (audio de otro, la grabadora, un video)">importada</span>{% endif %}</div></td>
+    <td>{{ c.materia_nombre }}</td>
+    <td class="num">{{ c.numero_clase if c.numero_clase is not none else '—' }}</td>
+    <td>{{ {'teorica': 'Teórica', 'practica': 'Práctica'}.get(c.tipo_clase, c.tipo_clase or '—') }}</td>
+    <td><span class="estado {{ c.estado }}"{% if c.importada and c.estado == 'grabando' %} title="La app está subiendo el audio importado"{% endif %}>{{ c.estado | estado_texto(c.importada) }}</span></td>
+    <td class="chico">{{ c.etapa or '' }}</td>
+    <td class="nowrap"><span class="barra-progreso"><span style="width: {{ c.progreso | porcentaje }}"></span></span> <span class="chico">{{ c.progreso | porcentaje }}</span></td>
+    <td>
+      {% if c.titulo %}<a href="/panel/clases/{{ c.id }}">{{ c.titulo }}</a>{% endif %}
+      {% if c.url_pdf %} <a class="chico" href="{{ c.url_pdf }}" target="_blank">PDF</a>{% endif %}
+      {% if c.adjuntos %}{% set n = c.adjuntos | length %}
+      <a class="chico nowrap" href="/panel/clases/{{ c.id }}" title="{{ n }} adjunto{{ 's' if n != 1 }}{% if c.adjuntos_sin_usar %}, {{ c.adjuntos_sin_usar }} sin usar en el apunte vigente{% endif %}">📎 {{ n }}{% if c.adjuntos_sin_usar %} <span class="aviso-texto">({{ c.adjuntos_sin_usar }} sin usar)</span>{% endif %}</a>
+      {% endif %}
+      {% if c.error %}<div class="{{ 'aviso-texto' if c.estado == 'esperando_usuario' else 'error-texto' }}">{{ c.error | truncate(220) }}</div>{% endif %}
+      {% if c.espera %}<div class="aviso-texto">Reintenta a las {{ c.espera.run_after | hora }}{% if c.espera.error %}: {{ c.espera.error | truncate(160) }}{% endif %}</div>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vacio">No hay clases{% if filtro_materia or filtro_estado %} con ese filtro{% endif %}.</p>
+{% endif %}
+{% endblock %}

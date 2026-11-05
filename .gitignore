@@ -1,0 +1,57 @@
+# Secretos y configuración local
+.env
+*.env
+!.env.example
+server/config.yaml
+
+# Datos (nunca al repo)
+Classmer-data/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.ogg
+*.opus
+*.m4a
+*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Android / Gradle
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# LaTeX (auxiliares)
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Worktrees y archivos locales de Claude Code
+.claude/worktrees/
+.claude/settings.local.json
+
+# Server falso de la app (android/tools/servidor_falso.py)
+datos-servidor-falso/

@@ -1,0 +1,8 @@
+{%- set destino = volver | default('/panel/pendientes') -%}
+{%- for nuevo, texto in (('hecho', 'Hecho'), ('descartado', 'Descartar'), ('abierto', 'Reabrir')) if nuevo != it.estado and (it.estado == 'abierto' or nuevo == 'abierto') -%}
+<form class="linea" method="post" action="/panel/items/{{ it.id }}">
+  <input type="hidden" name="estado" value="{{ nuevo }}">
+  <input type="hidden" name="volver" value="{{ destino }}">
+  <button type="submit" class="mini">{{ texto }}</button>
+</form>
+{% endfor -%}

@@ -1,0 +1,453 @@
+{% extends "base.html" %}
+{% block titulo %}{{ s.titulo or 'Clase' }}{% endblock %}
+{% block cabeza %}
+<style>
+.reproductor { position: sticky; top: 0; z-index: 5; }
+.reproductor audio { width: 100%; }
+a.t { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; white-space: nowrap; }
+.segmento { padding: 3px 0; border-bottom: 1px solid var(--borde); }
+.segmento:last-child { border-bottom: none; }
+.hablante { font-size: 11px; font-weight: 700; color: var(--suave); margin: 0 4px; }
+.fotos { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.fotos figure { margin: 0; }
+.fotos img { width: 100%; height: 130px; object-fit: cover; border-radius: 6px; border: 1px solid var(--borde); }
+.fotos figcaption { font-size: 12px; color: var(--suave); }
+iframe.pdf { width: 100%; height: 82vh; border: 1px solid var(--borde); border-radius: 8px; background: #fff; }
+.meta-clase { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; color: var(--suave); margin-bottom: 16px; }
+.aviso-adjuntos { margin: 12px 0 0; }
+.aviso-adjuntos form.linea { flex-wrap: wrap; }
+table.adjuntos td:first-child { word-break: break-word; }
+.subir-adjuntos { margin-top: 10px; }
+.subir-adjuntos form.linea { flex-wrap: wrap; margin-bottom: 6px; }
+.resumen-importacion { margin: 6px 0 4px; padding-left: 18px; }
+.dos { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.reproductor .pista { display: flex; gap: 10px; align-items: center; }
+.reproductor .pista + .pista { margin-top: 6px; }
+.reproductor .pista span { min-width: 64px; font-size: 12px; color: var(--suave); }
+.duda { border-top: 1px solid var(--borde); padding: 12px 0; }
+.duda:first-of-type { border-top: none; }
+.duda .cabeza { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.duda .contexto { font-size: 12px; color: var(--suave); margin: 4px 0; }
+.duda .opciones label { display: block; margin: 4px 0; }
+.duda .opciones .fuente { font-size: 11px; font-weight: 700; color: var(--suave); text-transform: uppercase; margin-right: 4px; }
+.duda textarea { width: 100%; margin-top: 4px; }
+.duda .escuchado { font-size: 12px; color: var(--suave); margin-top: 4px; }
+button.oir { padding: 2px 8px; font-size: 12px; }
+.transcripts a { margin-right: 12px; }
+@media (max-width: 900px) { .dos { grid-template-columns: 1fr; } }
+</style>
+{% endblock %}
+{% block contenido %}
+{% set volver = '/panel/clases/' ~ s.id %}
+<p class="chico"><a href="/panel/clases">← Clases</a></p>
+<h1>{{ s.titulo or 'Clase sin título todavía' }}</h1>
+<div class="meta-clase">
+  <span>{{ materia_nombre }}</span>
+  {% if s.numero_clase is not none %}<span>Clase {{ s.numero_clase }}</span>{% endif %}
+  <span>{{ s.inicio | fecha }}</span>
+  <span>{{ {'teorica': 'Teórica', 'practica': 'Práctica'}.get(s.tipo_clase, s.tipo_clase or '') }}</span>
+  {% if duracion_ms %}<span>{{ duracion_ms | duracion }}</span>{% endif %}
+  {% if s.importada %}<span class="etiqueta" title="No la grabó la app: se importó (audio de otro, la grabadora, un video)">importada</span>{% endif %}
+  <span class="estado {{ s.estado }}"{% if s.importada and s.estado == 'grabando' %} title="La app está subiendo el audio importado"{% endif %}>{{ s.estado | estado_texto(s.importada) }}</span>
+  {% if s.etapa %}<span class="chico">etapa: {{ s.etapa }}</span>{% endif %}
+  <span class="nowrap"><span class="barra-progreso"><span style="width: {{ api.progreso | porcentaje }}"></span></span> {{ api.progreso | porcentaje }}</span>
+  <span class="chico">{{ s.origen_materia or '' }}{% if s.confianza is not none %} ({{ '%.2f' | format(s.confianza) }}){% endif %}</span>
+</div>
+{% if s.error %}<div class="msg {{ 'aviso' if s.estado == 'esperando_usuario' else 'error' }}">{{ s.error }}</div>{% endif %}
+{% for p in avisos_pub %}
+<div class="msg aviso">Una carpeta publicada antes quedó sin archivar: {{ p.aviso or 'no se pudo archivar' }}. <span class="chico">({{ p.ruta }})</span></div>
+{% endfor %}
+
+<div class="tarjeta">
+  <div class="acciones">
+    <form class="linea" method="post" action="/panel/clases/{{ s.id }}/reprocesar">
+      <label for="desde">Reprocesar desde</label>
+      <select name="desde" id="desde">
+        {% for e in etapas %}<option value="{{ e }}" {% if e == 'apunte' %}selected{% endif %}>{{ e }}</option>{% endfor %}
+      </select>
+      <button type="submit">Reprocesar</button>
+    </form>
+    {% if puede_asignar %}
+    <form class="linea" method="post" action="/panel/clases/{{ s.id }}/materia">
+      <label for="materia_id">Asignar materia</label>
+      <select name="materia_id" id="materia_id">
+        {% for m in materias_activas %}<option value="{{ m.id }}" {% if m.id == s.materia_id %}selected{% endif %}>{{ m.nombre }}</option>{% endfor %}
+      </select>
+      <button type="submit" class="{{ 'primario' if s.estado == 'esperando_usuario' else '' }}">Asignar</button>
+    </form>
+    {% endif %}
+    {% if puede_borrar %}
+    <form class="linea" method="post" action="/panel/clases/{{ s.id }}/borrar" style="margin-left:auto"
+          onsubmit="return confirm('¿Borrar esta sesión de prueba? Se borran la base, el audio, las fotos, los adjuntos, el apunte y la copia publicada. No se puede deshacer.');">
+      <input type="hidden" name="confirmar" value="si">
+      <button type="submit" class="peligro">Borrar</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if api.adjuntos_sin_usar %}{% set n = api.adjuntos_sin_usar %}
+  <div class="msg aviso aviso-adjuntos">
+    <form class="linea" method="post" action="/panel/clases/{{ s.id }}/reprocesar"
+          onsubmit="return confirm('¿Regenerar el apunte con los adjuntos? Se rehace desde la etapa apunte: cuesta lo mismo que un apunte nuevo.');">
+      <span>Hay {{ n }} adjunto{{ 's' if n != 1 }} que el apunte vigente no usa.</span>
+      <input type="hidden" name="desde" value="apunte">
+      {% if puede_regenerar %}
+      <button type="submit">Regenerar el apunte con los adjuntos</button>
+      {% else %}
+      <span class="chico">Cuando termine lo que está en curso, lo vas a poder regenerar desde acá.</span>
+      {% endif %}
+    </form>
+  </div>
+  {% endif %}
+</div>
+
+{% if importacion %}{% set imp = importacion %}
+<div class="tarjeta importacion">
+  <strong>Clase importada</strong> <span class="chico">{{ imp.via }}{% if imp.importado %} · {{ imp.importado | fecha }}{% endif %}</span>
+  <ul class="resumen-importacion">
+    {% if imp.audio.nombre_original %}<li>Audio: {{ imp.audio.nombre_original }}{% if imp.audio.bytes %} <span class="chico">({{ imp.audio.bytes | tamano }}{% if imp.audio_tipo %}, {{ imp.audio_tipo }}{% endif %})</span>{% endif %}</li>{% endif %}
+    <li>Inicio: {{ imp.inicio | fecha }}, {{ imp.origen_inicio }}.</li>
+    <li>Fotos: {% if imp.fotos or imp.ilegibles %}{{ imp.ubicadas }} ubicada{{ 's' if imp.ubicadas != 1 }} por su hora · {{ imp.sin_hora }} sin hora (al final, sin minuto) · {{ imp.fuera }} fuera de la grabación (en el borde){% if imp.ilegibles %} · {{ imp.ilegibles | length }} ilegible{{ 's' if imp.ilegibles | length != 1 }}: {{ imp.ilegibles | map(attribute='nombre') | join(', ') }}{% endif %}{% else %}ninguna{% endif %}.</li>
+    {% if imp.material or imp.material_rechazado %}<li>Material: {{ imp.material | length }} adjunto{{ 's' if imp.material | length != 1 }}{% if imp.material_rechazado %} · no entraron: {% for m in imp.material_rechazado %}{{ m.nombre }} ({{ m.motivo }}){{ '; ' if not loop.last }}{% endfor %}{% endif %}.</li>{% endif %}
+  </ul>
+  {% for a in imp.avisos %}<div class="aviso-texto">{{ a }}</div>{% endfor %}
+</div>
+{% endif %}
+
+<div class="tarjeta reproductor">
+  {% if hay_audio %}
+  {% if hay_audio_celu %}<div class="pista"><span>Principal</span>{% endif %}
+  <audio id="audio" controls preload="metadata" src="/panel/clases/{{ s.id }}/audio"></audio>
+  {% if hay_audio_celu %}</div>
+  <div class="pista"><span>Celu</span><audio id="audio-celu" controls preload="metadata" src="/panel/clases/{{ s.id }}/audio-celu" data-desfase="{{ celu.desfase_ms or 0 }}"></audio></div>
+  <div class="chico">Desfase del celu: {{ '%.2f' | format((celu.desfase_ms or 0) / 1000) }} s{% if celu.desfase_origen == 'correlacion' %} (medido por correlación){% elif celu.desfase_origen == 'app' %} (de la app){% endif %}. Los minutos de abajo son los del audio principal.{% if not audio_celu_reproducible %} El navegador puede no reproducir este formato.{% endif %}</div>
+  {% endif %}
+  {% if not audio_reproducible %}<div class="chico">El navegador no reproduce este formato: la copia para el panel se arma al verificar la clase.</div>{% endif %}
+  {% elif s.importada and s.estado == 'grabando' %}
+  <p class="vacio" style="margin:0">La app está subiendo el audio de esta clase importada.</p>
+  {% else %}
+  <p class="vacio" style="margin:0">Todavía no hay audio de esta clase.</p>
+  {% endif %}
+</div>
+
+{% if rev %}
+<h2 id="revision">Revisión del transcript</h2>
+<div class="tarjeta">
+  <div class="chico">
+    {{ 'Conciliación del reloj y el celu, y limpieza' if rev.modo == 'conciliacion' else 'Limpieza (un solo audio)' }}
+    · {{ rev.modelo }}{% if rev.costo is not none %} · {{ rev.costo | costo(rev.facturacion) }}{% endif %}
+    · {{ rev.lineas }} línea{{ 's' if rev.lineas != 1 }}
+    · {{ rev.cantidad.pendientes + rev.cantidad.respondidas + rev.cantidad.resueltas }} duda{{ 's' if (rev.cantidad.pendientes + rev.cantidad.respondidas + rev.cantidad.resueltas) != 1 }}
+      ({{ rev.cantidad.resueltas }} resuelta{{ 's' if rev.cantidad.resueltas != 1 }} al volver a escuchar)
+    {% set automatica = rev.estado == 'aplicada' and rev.aplicada and rev.aplicada.como == 'automatica' %}
+    {% if automatica %}
+    · aplicada automáticamente: {{ rev.aplicada.con_propuesta }} duda{{ 's' if rev.aplicada.con_propuesta != 1 }} con la propuesta del modelo
+    {% else %}
+    · {{ {'esperando': 'esperando tu revisión', 'aplicada': 'aplicada', 'apagada': 'apagada en la materia (sigue el crudo)'}.get(rev.estado, rev.estado) }}
+    {% endif %}
+  </div>
+  {% for a in rev.avisos %}<div class="aviso-texto">{{ a }}</div>{% endfor %}
+  <div class="transcripts" style="margin-top:8px">{% for x in transcripts %}<a href="/panel/clases/{{ s.id }}/transcript/{{ x.cual }}" target="_blank">{{ x.nombre }}</a>{% endfor %}</div>
+
+  {% if esperando_revision %}
+  <div class="msg aviso" style="margin:12px 0 4px">El apunte espera tu revisión: elegí una versión de cada duda (o editala) y tocá <strong>Listo</strong>. Las que no toques quedan con la propuesta del modelo.</div>
+  <form method="post" action="/panel/clases/{{ s.id }}/revision">
+    {% for d in rev.pendientes %}
+    <div class="duda">
+      <div class="cabeza">
+        <a href="#" class="t" data-ms="{{ d.inicio_ms }}">{{ d.inicio_ms | hhmmss }}</a>
+        <button type="button" class="oir" data-ms="{{ d.inicio_ms - 3000 if d.inicio_ms > 3000 else 0 }}">▶ {{ 'reloj' if hay_audio_celu else 'audio' }}</button>
+        {% if hay_audio_celu %}<button type="button" class="oir" data-celu-ms="{{ d.inicio_ms - 3000 if d.inicio_ms > 3000 else 0 }}">▶ celu</button>{% endif %}
+        <span class="chico">{{ 'las dos grabaciones difieren' if d.paso == 'conciliar' else 'puede estar mal entendido' }}{% if d.motivo %}: {{ d.motivo }}{% endif %}</span>
+        {% if d.estado == 'respondida' %}<span class="etiqueta">respondida</span>{% endif %}
+      </div>
+      {% if d.antes %}<div class="contexto">{{ d.antes }}</div>{% endif %}
+      <div class="opciones">
+        {% set elegida = d.respuesta.texto if d.respuesta else none %}
+        {% for o in d.opciones %}
+        {# Sin responder no se tilda nada: "Guardar" sólo guarda lo que el usuario eligió (y "Listo" usa la propuesta para el resto). #}
+        <label><input type="radio" name="eleccion_{{ d.id }}" value="{{ loop.index0 }}"{% if elegida is not none and o.texto == elegida %} checked{% endif %}>
+          <span class="fuente">{{ {'reloj': 'reloj', 'celu': 'celu', 'audio': 'como se oyó', 'propuesta': 'propuesta', 'mezcla': 'mezcla', 'escucha': 'al volver a escuchar', 'modelo': 'modelo'}.get(o.fuente, o.fuente) }}</span>{{ o.texto }}{% if loop.index0 == d.propuesta %} <span class="chico">(propuesta del modelo)</span>{% endif %}</label>
+        {% endfor %}
+        <label><input type="radio" name="eleccion_{{ d.id }}" value="editar"{% if elegida is not none and elegida not in (d.opciones | map(attribute='texto') | list) %} checked{% endif %}> <span class="fuente">editar</span></label>
+        <textarea name="texto_{{ d.id }}" rows="2" data-duda="{{ d.id }}">{{ elegida if elegida is not none else d.opciones[d.propuesta].texto }}</textarea>
+      </div>
+      {% if d.escuchado %}<div class="escuchado">Al volver a escuchar —{% for fuente, texto in d.escuchado.items() %} {{ fuente }}: «{{ texto or '(nada)' }}»{{ ';' if not loop.last }}{% endfor %}</div>{% endif %}
+      {% if d.despues %}<div class="contexto">{{ d.despues }}</div>{% endif %}
+    </div>
+    {% endfor %}
+    <div class="acciones" style="margin-top:12px">
+      <button type="submit" name="accion" value="listo" class="primario">Listo</button>
+      <button type="submit" name="accion" value="guardar">Guardar sin terminar</button>
+      <button type="submit" name="accion" value="sin_revisar" style="margin-left:auto"
+              onclick="return confirm('¿Generar el apunte sin revisar? Las dudas que no respondiste quedan con lo que eligió el modelo.');">Generar sin revisar</button>
+    </div>
+  </form>
+  {% elif rev.pendientes %}
+  {# Ya aplicadas: se ven, pero no se responden. En la automática, abiertas: nadie las miró. #}
+  <details style="margin-top:10px"{% if automatica %} open{% endif %}><summary>{% if automatica %}Dudas aplicadas: {{ rev.cantidad.pendientes }} con la propuesta del modelo{% if rev.cantidad.respondidas %}, {{ rev.cantidad.respondidas }} respondida{{ 's' if rev.cantidad.respondidas != 1 }}{% endif %}{% else %}Dudas ({{ rev.pendientes | length }}){% endif %}</summary>
+    {% for d in rev.pendientes %}{% set elegida = d.respuesta.texto if d.respuesta else d.opciones[d.propuesta].texto %}<div class="contexto"><a href="#" class="t" data-ms="{{ d.inicio_ms }}">{{ d.inicio_ms | hhmmss }}</a> {{ elegida }} <span class="chico">({{ 'respondida' if d.respuesta else 'propuesta del modelo' }})</span>
+      {%- set otras = d.opciones | map(attribute='texto') | reject('equalto', elegida) | list %}{% if otras %} <span class="chico">— otra{{ 's' if otras | length != 1 }}: {% for o in otras %}«{{ o }}»{{ '; ' if not loop.last }}{% endfor %}</span>{% endif %}</div>{% endfor %}
+  </details>
+  {% endif %}
+  {% if rev.resueltas %}
+  <details style="margin-top:10px"><summary>Resueltas al volver a escuchar ({{ rev.resueltas | length }})</summary>
+    {% for d in rev.resueltas %}<div class="contexto"><a href="#" class="t" data-ms="{{ d.inicio_ms }}">{{ d.inicio_ms | hhmmss }}</a> {{ d.opciones[d.propuesta].texto }}{% if d.resolucion %} <span class="chico">({{ d.resolucion.motivo }})</span>{% endif %}</div>{% endfor %}
+  </details>
+  {% endif %}
+</div>
+{% endif %}
+
+<h2>Apunte</h2>
+{% if actual %}
+<div class="tarjeta">
+  <div class="acciones">
+    <strong>Versión vigente: v{{ actual.version }}</strong>
+    {% if url_pdf %}<a class="boton" href="{{ url_pdf }}" target="_blank">Abrir PDF</a>{% endif %}
+    {% if hay_tex %}<a class="boton" href="/panel/clases/{{ s.id }}/apunte.tex" target="_blank">Ver .tex</a>{% endif %}
+    {% if s.ruta_publicada %}<span class="chico" title="{{ s.ruta_publicada }}">Publicada en {{ s.ruta_publicada }}</span>{% endif %}
+  </div>
+  <div class="chico" style="margin-top:8px">
+    {{ actual.modelo or 'modelo por defecto' }} · esfuerzo {{ actual.esfuerzo or 'por defecto' }}
+    {%- if actual.facturacion %} · facturación: {{ actual.facturacion | pago }}{% endif %}
+    {%- if actual.costo is not none or actual.facturacion %} · costo: {{ actual.costo | costo(actual.facturacion) }}{% endif %}
+    · prompt {{ (actual.prompt_version or '—')[:10] }} · {{ actual.creado | fecha }} · {{ 'compiló' if actual.compilo else 'no compiló' }}
+  </div>
+  {% if aviso_version %}<div class="msg aviso" style="margin:10px 0 0">{{ aviso_version }}</div>{% endif %}
+</div>
+{% endif %}
+{% if url_pdf %}
+<iframe class="pdf" src="{{ url_pdf }}#view=FitH" title="Apunte en PDF{% if version_pdf %} (v{{ version_pdf }}){% endif %}"></iframe>
+{% else %}
+<p class="vacio">Todavía no hay un PDF que haya compilado.</p>
+{% endif %}
+
+{% if anteriores %}
+<h3>{{ 'Otras versiones' if hay_mas_nuevas else 'Versiones anteriores' }}</h3>
+<table>
+  <thead><tr><th class="num">Versión</th><th>Fecha</th><th>Modelo</th><th>Esfuerzo</th><th>Facturación</th><th>Prompt</th><th>Compiló</th><th>Costo</th><th>Archivos</th></tr></thead>
+  <tbody>
+  {% for x in anteriores %}{% set a = x.a %}
+  <tr>
+    <td class="num">v{{ a.version }}</td>
+    <td class="chico nowrap">{{ a.creado | fecha }}</td>
+    <td class="chico">{{ a.modelo or '—' }}<div>{{ a.titulo or '' }}</div></td>
+    <td class="chico">{{ a.esfuerzo or '—' }}</td>
+    <td class="chico">{{ a.facturacion | pago or '—' }}</td>
+    <td class="chico">{{ (a.prompt_version or '—')[:10] }}</td>
+    <td>{{ 'sí' if a.compilo else 'no' }}</td>
+    <td class="chico">{{ a.costo | costo(a.facturacion) }}</td>
+    <td class="nowrap">
+      {% if x.pdf %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.pdf" target="_blank">PDF</a>{% endif %}
+      {% if x.tex %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.tex" target="_blank">.tex</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if publicaciones %}
+<h3>Publicación</h3>
+<table>
+  <thead><tr><th>Estado</th><th class="num">Versión</th><th>Carpeta en la materia</th><th>Archivo / aviso</th><th>Actualizado</th></tr></thead>
+  <tbody>
+  {% for p in publicaciones %}
+  <tr>
+    <td class="nowrap"><span class="estado {{ {'vigente': 'lista', 'sin_archivar': 'parcial'}.get(p.estado, '') }}">{{ {'vigente': 'vigente', 'archivada': 'archivada', 'sin_archivar': 'sin archivar', 'no_esta': 'ya no está'}.get(p.estado, p.estado) }}</span></td>
+    <td class="num">{% if p.version %}v{{ p.version }}{% endif %}</td>
+    <td class="chico">{{ p.ruta }}</td>
+    <td class="chico">{% if p.archivo %}Archivada en {{ p.archivo }}{% endif %}{% if p.aviso %}<div class="{{ 'aviso-texto' if p.estado == 'sin_archivar' else '' }}">{{ p.aviso }}</div>{% endif %}</td>
+    <td class="chico nowrap">{{ p.actualizado | fecha }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if items %}
+<h2>Pendientes de esta clase</h2>
+<table>
+  <thead><tr><th>Tipo</th><th>Texto</th><th>Minuto</th><th>Estado</th><th></th></tr></thead>
+  <tbody>
+  {% for it in items %}
+  <tr>
+    <td><span class="estado {{ it.tipo }}">{{ it.tipo }}</span></td>
+    <td>{{ it.texto }}{% if it.fecha_limite %} <span class="chico">(para el {{ it.fecha_limite }})</span>{% endif %}</td>
+    <td>{% if it.offset_ms is not none %}<a href="#" class="t" data-ms="{{ it.offset_ms }}">{{ it.offset_ms | hhmmss }}</a>{% endif %}</td>
+    <td><span class="estado {{ it.estado }}">{{ it.estado }}</span></td>
+    <td class="nowrap">{% include "_item_botones.html" %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Adjuntos{% if adjuntos_clase %} ({{ adjuntos_clase | length }}){% endif %}</h2>
+{% if adjuntos_clase %}
+<table class="adjuntos">
+  <thead><tr><th>Archivo</th><th>Tipo</th><th class="num">Tamaño</th><th>Minuto</th><th>Estado</th><th></th></tr></thead>
+  <tbody>
+  {% for a in adjuntos_clase %}
+  <tr>
+    <td><a href="{{ a.url }}" target="_blank">{{ a.nombre_original }}</a>{% if a.origen == 'panel' %} <span class="chico">(desde el panel)</span>{% endif %}</td>
+    <td class="chico nowrap">{{ a.descripcion }}</td>
+    <td class="num chico">{{ a.bytes | tamano }}</td>
+    <td class="nowrap">{% if a.offset_ms is not none %}<a href="#" class="t" data-ms="{{ a.offset_ms }}">{{ a.offset_ms | hhmmss }}</a>{% else %}<span class="chico">sin minuto</span>{% endif %}</td>
+    <td><span class="estado {{ a.estado_css }}">{{ a.estado_texto }}</span> <span class="chico">{{ a.estado_ayuda }}</span></td>
+    <td class="nowrap"><a href="{{ a.url_descarga }}">Descargar</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<div class="tarjeta subir-adjuntos">
+  <form class="linea" method="post" action="/panel/clases/{{ s.id }}/adjuntos" enctype="multipart/form-data">
+    <input type="file" name="archivos" multiple required accept="{{ acepta_adjuntos }}">
+    <button type="submit">Adjuntar</button>
+  </form>
+  <div class="chico">PDF de slides o notas del profe, o imágenes ({{ tipos_adjunto }}, hasta {{ max_adjunto_mb }} MB cada uno): el agente los usa como material de referencia al hacer el apunte.</div>
+</div>
+
+<h2>Audio del celu</h2>
+<div class="tarjeta">
+  {% if celu %}
+  <div class="chico">{{ 'De la app (Ambos)' if celu.origen == 'app' else 'Agregado desde el panel' }}{% if celu.nombre_original %}: {{ celu.nombre_original }}{% endif %}{% if celu.duracion_ms %} · {{ celu.duracion_ms | duracion }}{% endif %} · desfase {{ '%.2f' | format((celu.desfase_ms or 0) / 1000) if celu.desfase_ms is not none else 'por medir' }}{% if celu.desfase_ms is not none %} s{% endif %}</div>
+  {% endif %}
+  {% if puede_agregar_celu %}
+  <form class="linea" method="post" action="/panel/clases/{{ s.id }}/celu" enctype="multipart/form-data" style="margin-top:6px"
+        onsubmit='return confirm({{ confirmacion_celu | tojson }});'>
+    <input type="file" name="audio" required accept="audio/*,video/*">
+    <button type="submit">{{ 'Reemplazar el audio del celu' if celu else 'Agregar audio del celu' }}</button>
+  </form>
+  <div class="chico">Un audio de esta misma clase grabado con otra app (la grabadora del celu, por ejemplo). El desfase con el principal se mide solo; se transcribe y se vuelve a revisar el transcript con las dos grabaciones.</div>
+  {% elif not celu %}
+  <div class="chico">Cuando la clase termine de procesarse vas a poder agregarle un audio del celu grabado aparte.</div>
+  {% endif %}
+</div>
+
+{% if fotos %}
+<h2>Fotos ({{ fotos | length }})</h2>
+<div class="fotos">
+  {% for f in fotos %}
+  <figure>
+    <a href="/panel/clases/{{ s.id }}/archivo/{{ f.ruta }}" target="_blank"><img loading="lazy" src="/panel/clases/{{ s.id }}/archivo/{{ f.ruta }}" alt="Foto de la pizarra"></a>
+    <figcaption>{% if f.offset_ms is not none %}<a href="#" class="t" data-ms="{{ f.offset_ms }}">{{ f.offset_ms | hhmmss }}</a>{% else %}sin minuto{% endif %}</figcaption>
+  </figure>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% set notas = eventos | rejectattr('tipo', 'equalto', 'foto') | list %}
+{% if notas %}
+<h2>Notas y marcas</h2>
+<table>
+  <thead><tr><th>Minuto</th><th>Tipo</th><th>Detalle</th></tr></thead>
+  <tbody>
+  {% for e in notas %}
+  <tr>
+    <td>{% if e.offset_ms is not none %}<a href="#" class="t" data-ms="{{ e.offset_ms }}">{{ e.offset_ms | hhmmss }}</a>{% endif %}</td>
+    <td>{{ {'marca': 'Marca', 'nota': 'Nota', 'pausa': 'Pausa', 'reanudar': 'Reanudar'}.get(e.tipo, e.tipo) }}</td>
+    <td>{% if e.tipo == 'marca' %}{{ {'importante': '⭐ Importante', 'no_entendi': '❓ No entendí'}.get(e.datos.marca, e.datos.marca) }}{% else %}{{ e.datos.texto or '' }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<div class="dos">
+  <div>
+    <h2>Transcript</h2>
+    {% if transcripts | length > 1 %}<div class="transcripts chico" style="margin:-6px 0 8px">{% for x in transcripts %}<a href="/panel/clases/{{ s.id }}/transcript/{{ x.cual }}" target="_blank">{{ x.nombre }}</a>{% endfor %}</div>{% endif %}
+    {% if transcript %}
+    <div class="tarjeta desplazable">
+      {% for seg in transcript %}
+      <div class="segmento"><a href="#" class="t" data-ms="{{ seg.inicio_ms }}">{{ seg.inicio_ms | hhmmss }}</a>{% if seg.hablante %}<span class="hablante">{{ seg.hablante }}</span>{% endif %} {{ seg.texto }}</div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="vacio">Todavía no hay transcript.</p>
+    {% endif %}
+  </div>
+  <div>
+    <h2>Línea de tiempo</h2>
+    {% if timeline %}
+    <div class="tarjeta desplazable">
+      {% for l in timeline %}
+      <div class="segmento">{% if l.ms is not none %}<a href="#" class="t" data-ms="{{ l.ms }}">{{ l.tiempo }}</a> {% endif %}{{ l.texto }}</div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="vacio">Todavía no hay línea de tiempo.</p>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Procesamiento</h2>
+{% if jobs %}
+<table>
+  <thead><tr><th class="num">Job</th><th>Etapa</th><th>Estado</th><th class="num">Intentos</th><th>Actualizado</th><th>Pago</th><th>Costo</th><th>Detalle</th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+  <tr>
+    <td class="num">{{ j.id }}</td>
+    <td>{{ j.tipo }}{% if j.args and j.args != '{}' %} <span class="chico">{{ j.args }}</span>{% endif %}</td>
+    <td><span class="estado {{ j.estado }}">{{ j.estado }}</span></td>
+    <td class="num">{{ j.intentos }}/{{ j.max_intentos }}</td>
+    <td class="chico nowrap">{{ j.actualizado | hora }}</td>
+    <td class="chico nowrap">{{ j.facturacion | pago }}</td>
+    <td class="chico">{{ j.costo | costo(j.facturacion) }}</td>
+    <td>{% if j.error %}<div class="error-texto">{{ j.error | truncate(300) }}</div>{% endif %}{% if j.log %}<div class="chico">{{ j.log | truncate(300) }}</div>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vacio">Sin jobs todavía ({{ 'la app todavía está subiendo el audio' if s.importada else 'la grabación no se finalizó' }}).</p>
+{% endif %}
+
+{% if log %}
+<details style="margin-top:16px">
+  <summary>pipeline.log (últimas líneas)</summary>
+  <pre class="desplazable" style="margin-top:8px">{{ log | join('\n') }}</pre>
+</details>
+{% endif %}
+<p class="chico" style="margin-top:20px">Sesión {{ s.id }} · dispositivo {{ s.dispositivo or '—' }} · creada {{ s.creado | fecha }}</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var audio = document.getElementById('audio');
+  var celu = document.getElementById('audio-celu');
+  function saltar(reproductor, segundos, otro) {
+    if (!reproductor) return;
+    if (otro) otro.pause();
+    reproductor.currentTime = Math.max(0, segundos);
+    reproductor.play().catch(function () {});
+  }
+  document.addEventListener('click', function (ev) {
+    var el = ev.target.closest('[data-ms], [data-celu-ms]');
+    if (!el) return;
+    ev.preventDefault();
+    if (el.hasAttribute('data-celu-ms')) {
+      // Minuto del principal → tiempo del celu: t_celu = t_principal − desfase.
+      var desfase = parseInt(celu.getAttribute('data-desfase'), 10) || 0;
+      saltar(celu, ((parseInt(el.getAttribute('data-celu-ms'), 10) || 0) - desfase) / 1000, audio);
+    } else {
+      saltar(audio, (parseInt(el.getAttribute('data-ms'), 10) || 0) / 1000, celu);
+    }
+  });
+  // Escribir en el texto de una duda elige "editar".
+  document.querySelectorAll('textarea[data-duda]').forEach(function (area) {
+    area.addEventListener('input', function () {
+      var r = document.querySelector('input[name="eleccion_' + area.getAttribute('data-duda') + '"][value="editar"]');
+      if (r) r.checked = true;
+    });
+  });
+  var t = new URLSearchParams(location.search).get('t');
+  if (audio && t) {
+    audio.addEventListener('loadedmetadata', function () { audio.currentTime = parseInt(t, 10) / 1000; }, { once: true });
+  }
+})();
+</script>
+{% endblock %}

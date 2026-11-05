@@ -1,0 +1,79 @@
+# Guion de una clase de prueba para Classmer (matemática, unos 7 minutos hablados).
+# Lo lee scripts/generar-audio-prueba.ps1 con las voces de Windows.
+#
+# Marcadores:
+#   [PROFE] / [ALUMNO]  cambian de hablante (otra voz si hay, o la misma con otra velocidad y tono)
+#   [PAUSA n]           n segundos de silencio (pausa normal de la clase)
+#   [SILENCIO n]        silencio largo: la segmentación lo tiene que descartar (n > silencio_largo_s)
+# Las líneas que empiezan con # son comentarios. Una línea en blanco separa párrafos.
+# Números y fórmulas van en palabras para que la voz los lea bien.
+#
+# Qué debería encontrar el pipeline: definición de derivada direccional, una pregunta de un alumno
+# (vector no unitario), el gradiente, "esto no lo voy a demostrar", un ejemplo con números
+# (resultado treinta y seis quintos), una duda (gradiente perpendicular a las curvas de nivel),
+# un aviso de parcial (jueves 5 de noviembre) y una tarea (práctica 4, ejercicios 3 a 8 y 12).
+
+[PROFE]
+Bueno, chicos, buenas tardes. Arrancamos, que hoy tenemos bastante. Antes de empezar, les recuerdo que la consulta sigue siendo los martes a las seis, en el aula doce. La clase pasada vimos derivadas parciales, y hoy vamos a generalizar esa idea: vamos a ver la derivada direccional y el gradiente.
+
+La pregunta es la siguiente. Tenemos una función f de dos variables, de erre dos en erre, y un punto p. Las derivadas parciales nos dicen cómo cambia f si nos movemos en la dirección del eje x, o en la dirección del eje y. Pero, ¿qué pasa si nos queremos mover en cualquier otra dirección? Para eso está la derivada direccional.
+
+[PAUSA 2]
+
+Anoten la definición. Sea u un vector de norma uno, o sea, un vector unitario. La derivada direccional de f en el punto p, en la dirección de u, que la escribimos de sub u de f de p, es el límite, cuando t tiende a cero, de f de p más t por u, menos f de p, todo dividido t.
+
+Fíjense que si u es el primer vector canónico, el uno cero, esto es exactamente la derivada parcial respecto de x. Y si u es el cero uno, es la derivada parcial respecto de y. O sea que las parciales son un caso particular de la derivada direccional.
+
+[ALUMNO]
+Profe, una pregunta. ¿Y si el vector u no es unitario? ¿No se puede calcular igual?
+
+[PROFE]
+Buena pregunta. El límite se puede calcular, sí, pero el resultado queda multiplicado por la norma de u. Si u tiene norma dos, te da el doble. Entonces ya no estás midiendo solamente cómo cambia la función, sino también qué tan rápido te movés. Por eso pedimos que u sea unitario. Si les dan un vector que no es unitario, primero lo normalizan, o sea, lo dividen por su norma, y después calculan. Esto lo toman siempre, así que ojo.
+
+[PAUSA 2]
+
+Ahora, calcular ese límite cada vez es un embole. Por suerte hay un atajo. Definimos el gradiente de f en p, que se escribe con el símbolo nabla, como el vector que tiene las derivadas parciales: la derivada respecto de x y la derivada respecto de y, las dos evaluadas en p.
+
+Y el teorema dice lo siguiente: si f es diferenciable en p, entonces la derivada direccional en la dirección de u es igual al producto escalar entre el gradiente de f en p y el vector u. Esto es muy importante, lo van a usar todo el tiempo.
+
+Esto no lo voy a demostrar, porque la demostración sale de la definición de diferenciabilidad y nos lleva media clase. La tienen en el apunte de la cátedra, en el capítulo cuatro. Les recomiendo que la lean antes del parcial.
+
+[PAUSA 2]
+
+Vamos con un ejemplo con números. Sea f de x y igual a x al cuadrado más tres x y. Tomamos el punto p igual a uno dos, y la dirección u igual a tres quintos, cuatro quintos. Primero verifiquen que u es unitario: tres quintos al cuadrado más cuatro quintos al cuadrado da nueve veinticincoavos más dieciséis veinticincoavos, que es uno. Perfecto.
+
+Calculamos las parciales. La derivada respecto de x es dos x más tres y. La derivada respecto de y es tres x. Evaluamos en el punto uno dos: la parcial respecto de x da dos más seis, ocho. La parcial respecto de y da tres. Entonces el gradiente en uno dos es el vector ocho tres.
+
+Y la derivada direccional es el producto escalar: ocho por tres quintos, más tres por cuatro quintos. Eso es veinticuatro quintos más doce quintos, que da treinta y seis quintos, o sea, siete coma dos.
+
+[ALUMNO]
+¿Y el gradiente es un vector o un número?
+
+[PROFE]
+Es un vector, ojo con eso. La derivada direccional es un número; el gradiente es un vector. Confundirlos es un error típico de parcial.
+
+Hagamos uno más rápido, con un vector que no es unitario, como preguntaban hoy. Si me dan la dirección v igual a uno uno, primero la normalizo: la norma de v es raíz de dos, así que u es uno sobre raíz de dos, uno sobre raíz de dos. Y la derivada direccional da ocho más tres, once, dividido raíz de dos. Más o menos siete coma setenta y ocho.
+
+Bueno, copien esto tranquilos, que después lo borro. Les doy un minutito.
+
+[SILENCIO 40]
+
+¿Ya está? ¿Copiaron todos? Bien, sigo.
+
+Ahora viene algo muy lindo. ¿En qué dirección crece más rápido la función? Como la derivada direccional es un producto escalar, es igual a la norma del gradiente, por la norma de u, por el coseno del ángulo entre los dos. Como u tiene norma uno, el máximo se alcanza cuando el ángulo es cero, o sea, cuando u apunta para el mismo lado que el gradiente. Y ese valor máximo es justamente la norma del gradiente. Al revés, en la dirección de menos el gradiente, la función decrece lo más rápido posible, y la derivada direccional es menos la norma del gradiente. Eso es lo que usan los métodos de descenso por gradiente, que seguramente vean en otras materias.
+
+En nuestro ejemplo, la norma del gradiente es la raíz de sesenta y cuatro más nueve, raíz de setenta y tres, más o menos ocho coma cinco. Así que ninguna dirección te puede dar una derivada direccional mayor que eso.
+
+[ALUMNO]
+Perdón, profe, no entendí una cosa. ¿Por qué el gradiente es perpendicular a las curvas de nivel?
+
+[PROFE]
+Bien, eso lo dibujé acá en el pizarrón. Piensen así: sobre una curva de nivel la función vale siempre lo mismo, no cambia. Entonces, si te movés en la dirección tangente a la curva, la derivada direccional da cero. Pero la derivada direccional es el gradiente por u. Si eso da cero, el gradiente y la tangente son perpendiculares. Por eso el gradiente es perpendicular a las curvas de nivel, y apunta hacia donde la función crece.
+
+[PAUSA 2]
+
+Un aviso importante. Todo lo de hoy, derivada direccional, gradiente y curvas de nivel, entra en el parcial del cinco de noviembre. El parcial es el jueves cinco de noviembre, en este mismo horario y en esta misma aula. Seguro va a haber un ejercicio de calcular una derivada direccional y otro de dirección de máximo crecimiento.
+
+Y para la próxima clase, de tarea, hagan los ejercicios tres a ocho de la práctica cuatro, y también el doce, que es de curvas de nivel. La próxima clase arrancamos con regla de la cadena, así que vengan con esto hecho.
+
+Bueno, chicos, por hoy es todo. Nos vemos el jueves.

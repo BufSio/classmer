@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  El server de Classmer corre en la PC de casa y habla HTTP sin TLS. Sólo se permite texto plano
+  hacia estas direcciones; todo lo demás sigue exigiendo HTTPS.
+
+  Si la PC cambia de IP: agregala acá y reinstalá la app (mejor: reservarle la IP en el router).
+  Desde afuera de casa se llega a la misma IP por el WireGuard del router.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- PC con el server, en la LAN de casa. -->
+        <domain includeSubdomains="false">192.168.1.10</domain>
+        <!-- Emulador de Android hacia la PC, y adb reverse (adb reverse tcp:8000 tcp:8000). -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

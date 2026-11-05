@@ -1,0 +1,138 @@
+# Configuración de Classmer.
+#
+# `classmer init` copia este archivo a Classmer-data\config.yaml (fuera del repo).
+# La carpeta de datos es %USERPROFILE%\Documents\Classmer-data, salvo que definas CLASSMER_HOME.
+# Las rutas aceptan variables de entorno como %USERPROFILE%.
+# Los secretos (CLASSMER_TOKEN, GEMINI_API_KEY, ANTHROPIC_API_KEY) NO van acá: van en
+# Classmer-data\.env.
+
+# Carpeta para la base, las sesiones, los jobs y los backups. Si no se indica, es la misma
+# carpeta de este archivo.
+# datos: '%USERPROFILE%\Documents\Classmer-data'
+
+servidor:
+  host: 0.0.0.0
+  port: 8000
+
+zona_horaria: America/Argentina/Buenos_Aires
+
+# --- Motores de IA por tarea (§7) ---------------------------------------------------------
+# Los modelos se eligen de una lista en el panel (Modelos), que sale del catálogo de Classmer
+# ("Redescubrir modelos" o `uv run classmer modelos --redescubrir` lo actualiza con las APIs de
+# Anthropic y Google). Los cambios se aplican sin reiniciar: el próximo job ya usa la config nueva.
+# esfuerzo (sólo Claude): low | medium | high | xhigh | max.
+
+transcribir:
+  motor: gemini              # gemini | whisper (v0.2)
+  modelo: gemini-3.5-transcribe       # ASR de Gemini: tiempos por palabra y hablantes
+  modelo_respaldo: gemini-pro-latest  # LLM con salida JSON si el ASR falla la validación
+  idioma: es-AR
+  respaldo: null             # whisper cuando exista (v0.2)
+  paralelo: 3                # bloques transcribiéndose a la vez
+  intentos_validacion: 2     # intentos por bloque si la salida no pasa la validación
+
+clasificar:
+  motor: claude              # claude | gemini
+  modelo: claude-sonnet-5-5  # con gemini: p. ej. gemini-flash-latest
+  esfuerzo: medium           # sólo con Claude
+  umbral_confianza: 0.75     # por debajo, la sesión queda en esperando_usuario
+
+revisar_transcript:          # la revisión del transcript (§15); el tipo (automática, asistida o apagada) va en cada materia
+  modelo: claude-sonnet-5-5  # Claude con salida estructurada (Opus 5.5: mejores dudas, ~3x el costo)
+  esfuerzo: medium
+  escuchar_max: 30           # dudas que Gemini vuelve a escuchar en los dos audios, por clase (agrupadas)
+
+apunte:
+  motor: claude-agent        # Claude Agent SDK (API key o plan Max: ver `claude.facturacion`)
+  modelo: claude-opus-5-5    # cada materia puede fijar el suyo (`apunte:` dentro de la materia)
+  esfuerzo: high
+  motor_latex: pdflatex      # pdflatex | lualatex
+  max_intentos_compilacion: 5
+  tope_correccion_min: 10    # tiempo máximo corrigiendo errores de compilación
+  timeout_min: 45            # tope total del agente (escribir + compilar)
+
+segmentar:
+  bloque_s: 600              # largo objetivo de cada bloque (~10 min)
+  ventana_s: 120             # cuánto se puede alejar el corte del objetivo buscando un silencio
+  silencio_db: -35           # umbral de silencio para ffmpeg silencedetect
+  silencio_min_s: 0.7        # silencio mínimo para cortar
+  silencio_largo_s: 30       # los silencios más largos se descartan (no se transcriben)
+
+# --- Facturación de Claude (clasificar, revisar el transcript y el apunte) -------------------------
+# facturacion:
+#   api            sólo la API key (ANTHROPIC_API_KEY en Classmer-data\.env)
+#   max            sólo el plan Max (el login de Claude Code en esta PC)
+#   api_luego_max  la API y, si se queda sin créditos o la clave es inválida, el plan Max
+#   max_luego_api  el plan Max y, si se agota su cupo, la API
+# Sin ANTHROPIC_API_KEY, los modos con API funcionan como max (el panel lo avisa). Después de un
+# error de créditos, las tareas siguientes van directo al otro medio y la API se vuelve a probar a
+# las `reintentar_api_h` horas, si cambia la clave del .env o con "Reintentar API" en el panel.
+claude:
+  facturacion: api_luego_max
+  reintentar_api_h: 6
+
+# --- Estilo global del apunte (capa 2 del prompt, §7) ------------------------------------
+# Se suma al estilo por defecto de server/prompts/apunte.md.
+estilo_global: |
+  Incluí gráficos (TikZ/pgfplots) cuando ayuden a entender, ejemplos y referencias.
+
+# --- Materias (§9) ------------------------------------------------------------------------
+# calendario: reglas para que la app autocomplete la materia desde el calendario del celu.
+#   titulo_regex: búsqueda sin distinguir mayúsculas sobre el título del evento.
+#   calendario:   nombre visible del calendario (sin distinguir mayúsculas).
+#   Si vienen los dos, tienen que coincidir los dos; si no viene ninguno, no se autocompleta.
+# perfil: archivo dentro de la carpeta de la materia. Si no existe, se usa PROMPT-AGENTE.md;
+#   si tampoco existe, el agente trabaja con el nombre de la materia y recorre la carpeta.
+# carpeta_clases: subcarpeta donde se publican los apuntes (por defecto, Clases-Classmer).
+# numero_clase_inicial: con qué número arranca la numeración (por defecto 1). El panel y la app
+#   lo ajustan solos cuando cambiás el "próximo número de clase".
+# activa: false para que la materia no aparezca en la app (por defecto true).
+# revision: el tipo de revisión del transcript antes del apunte (§15), para todas las clases:
+#   automatica (por defecto): concilia el reloj y el celu y limpia; las dudas que quedan toman la
+#     propuesta del modelo y el apunte sale solo;
+#   asistida: lo mismo, pero el apunte espera a que revises las dudas en el panel ("Listo");
+#   apagada: la clase sigue como antes (el crudo y el apunte directo).
+#   El switch viejo `revisar_transcript: false` vale como apagada (y true, como automatica).
+# profesor: el nombre del profe en el transcript revisado (sin esto, "Profe").
+# apunte: modelo y esfuerzo propios del apunte de esta materia, p. ej.
+#   apunte: {modelo: claude-opus-5-5, esfuerzo: max}
+#   Sin esta clave, la materia usa el modelo y el esfuerzo globales de `apunte`.
+# Todo esto se puede editar desde el panel (http://127.0.0.1:8000/panel) sin reiniciar.
+
+materias:
+  - id: analisis
+    nombre: "Análisis Matemático II"
+    carpeta: '%USERPROFILE%\Documents\Claude\Projects\Análisis Matemático II'
+    perfil: PROMPT-AGENTE.md
+    carpeta_clases: 08-Clases
+    calendario:
+      calendario: null
+      titulo_regex: null     # TODO: completar con el título real de los eventos, p. ej. "An[aá]lisis Matem[aá]tico"
+    tipos_clase: [teorica, practica]
+
+  - id: teoria-juegos
+    nombre: "Teoría de Juegos"
+    carpeta: '%USERPROFILE%\Documents\Claude\Projects\Teoría de Juegos'
+    calendario:
+      calendario: null
+      titulo_regex: null     # TODO: completar, p. ej. "Teor[ií]a de Juegos"
+    tipos_clase: [teorica, practica]
+
+  - id: macro
+    nombre: "Macroeconomía I"
+    carpeta: '%USERPROFILE%\Documents\Claude\Projects\Macroeconomia I'
+    perfil: PROMPT-AGENTE-MACRO.md
+    profesor: Laura Inés Gómez
+    calendario:
+      calendario: null
+      titulo_regex: null     # TODO: completar, p. ej. "Macroeconom[ií]a"
+    tipos_clase: [teorica, practica]
+
+  - id: riesgo
+    nombre: "Riesgo Financiero"
+    carpeta: '%USERPROFILE%\Documents\Claude\Projects\Riesgo Financiero'
+    perfil: PROMPT-AGENTE-RIESGO.md
+    calendario:
+      calendario: null
+      titulo_regex: null     # TODO: completar, p. ej. "Riesgo"
+    tipos_clase: [teorica, practica]

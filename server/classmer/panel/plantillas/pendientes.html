@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block titulo %}Pendientes · {{ m.nombre }}{% endblock %}
+{% block contenido %}
+{% set volver = '/panel/pendientes?materia=' ~ m.id ~ ('&ver=todos' if ver == 'todos' else '') %}
+<p class="chico"><a href="/panel/pendientes">← Pendientes</a></p>
+<div class="acciones" style="justify-content: space-between">
+  <div>
+    <h1>{{ m.nombre }}</h1>
+    <p class="sub">Próxima clase: {{ proximo }} · <a href="/panel/materias/{{ m.id }}">editar materia</a></p>
+  </div>
+  <div>
+    {% if ver == 'todos' %}<a class="boton" href="/panel/pendientes?materia={{ m.id }}">Sólo abiertos</a>
+    {% else %}<a class="boton" href="/panel/pendientes?materia={{ m.id }}&ver=todos">Ver también hechos y descartados</a>{% endif %}
+  </div>
+</div>
+
+{% set titulos = {'parcial': 'Para el parcial', 'fecha': 'Fechas', 'tarea': 'Tareas', 'duda': 'Dudas', 'aviso': 'Avisos', 'otros': 'Otros'} %}
+{% if total == 0 %}
+<p class="vacio">{{ 'No hay items.' if ver == 'todos' else 'No hay pendientes abiertos.' }}</p>
+{% endif %}
+{% for tipo, lista in grupos.items() if lista %}
+<h2>{{ titulos.get(tipo, tipo) }} <span class="chico">({{ lista | length }})</span></h2>
+<table>
+  <thead><tr><th style="width:50%">Texto</th><th>Clase</th><th>Minuto</th><th>Estado</th><th></th></tr></thead>
+  <tbody>
+  {% for it in lista %}
+  <tr>
+    <td>{{ it.texto }}{% if it.fecha_limite %}<div class="chico">para el {{ it.fecha_limite }}</div>{% endif %}</td>
+    <td class="chico">{% if it.sesion_id %}<a href="/panel/clases/{{ it.sesion_id }}">{% if it.numero_clase is not none %}Clase {{ it.numero_clase }} · {% endif %}{{ (it.inicio or '')[:10] }}</a>{% if it.clase_titulo %}<div>{{ it.clase_titulo | truncate(60) }}</div>{% endif %}{% endif %}</td>
+    <td>{% if it.offset_ms is not none and it.sesion_id %}<a class="t" href="/panel/clases/{{ it.sesion_id }}?t={{ it.offset_ms }}">{{ it.offset_ms | hhmmss }}</a>{% endif %}</td>
+    <td><span class="estado {{ it.estado }}">{{ it.estado }}</span></td>
+    <td class="nowrap">{% include "_item_botones.html" %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endfor %}
+
+<h2>Clases recientes</h2>
+{% if recientes %}
+<table>
+  <thead><tr><th>Fecha</th><th class="num">N.º</th><th>Título</th><th>Estado</th></tr></thead>
+  <tbody>
+  {% for c in recientes %}
+  <tr>
+    <td class="nowrap"><a href="/panel/clases/{{ c.id }}">{{ c.inicio | fecha }}</a></td>
+    <td class="num">{{ c.numero_clase if c.numero_clase is not none else '—' }}</td>
+    <td>{{ c.titulo or '' }}{% if c.url_pdf %} <a class="chico" href="{{ c.url_pdf }}" target="_blank">PDF</a>{% endif %}</td>
+    <td><span class="estado {{ c.estado }}">{{ c.estado }}</span></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vacio">Todavía no hay clases de esta materia.</p>
+{% endif %}
+{% endblock %}

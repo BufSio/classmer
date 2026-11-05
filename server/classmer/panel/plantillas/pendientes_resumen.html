@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block titulo %}Pendientes{% endblock %}
+{% block contenido %}
+<h1>Pendientes</h1>
+<p class="sub">Lo que detectó cada apunte: avisos de parcial, fechas, tareas, dudas y avisos. Elegí una materia.</p>
+<div class="grilla">
+  {% for r in materias if r.m.activa or r.abiertos %}
+  <a class="tarjeta" href="/panel/pendientes?materia={{ r.m.id }}" style="color:inherit; text-decoration:none">
+    <h3 style="margin-top:0">{{ r.m.nombre }}</h3>
+    <div class="chico">Próxima clase: {{ r.proximo }} · {{ r.contadas }} clase{{ '' if r.contadas == 1 else 's' }}</div>
+    <div style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap">
+      {% set conteo = por_tipo[r.m.id] %}
+      {% set plurales = {'parcial': 'parciales', 'fecha': 'fechas', 'tarea': 'tareas', 'duda': 'dudas', 'aviso': 'avisos'} %}
+      {% for tipo in ('parcial', 'fecha', 'tarea', 'duda', 'aviso') if conteo.get(tipo) %}
+      <span class="estado {{ tipo }}">{{ conteo[tipo] }} {{ tipo if conteo[tipo] == 1 else plurales[tipo] }}</span>
+      {% else %}
+      <span class="vacio">Sin pendientes abiertos</span>
+      {% endfor %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}

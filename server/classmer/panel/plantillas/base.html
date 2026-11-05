@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block titulo %}Classmer{% endblock %} · Classmer</title>
+{% block cabeza %}{% endblock %}
+<style>
+:root {
+  --fondo: #f6f7f9; --panel: #ffffff; --texto: #1d2330; --suave: #5f6b7d; --borde: #dfe3ea;
+  --acento: #2f5bd3; --acento-suave: #e8eefc; --ok: #1f8a4c; --ok-suave: #e3f4ea;
+  --error: #c0392b; --error-suave: #fbe9e7; --aviso: #b26a00; --aviso-suave: #fff3df;
+  --gris-suave: #eef0f3; --codigo: #f1f3f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fondo: #14171c; --panel: #1c2027; --texto: #e6e9ef; --suave: #9aa5b5; --borde: #2e343e;
+    --acento: #7ea2ff; --acento-suave: #233154; --ok: #5cc98a; --ok-suave: #1d3428;
+    --error: #ff7d6e; --error-suave: #3d2220; --aviso: #ffbd59; --aviso-suave: #3a2e18;
+    --gris-suave: #262b34; --codigo: #232830;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--fondo); color: var(--texto);
+       font: 15px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+a { color: var(--acento); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { background: var(--panel); border-bottom: 1px solid var(--borde); }
+header .barra { max-width: 1200px; margin: 0 auto; padding: 0 20px; display: flex; align-items: center;
+                gap: 24px; height: 54px; }
+header .marca { font-weight: 700; font-size: 17px; color: var(--texto); }
+header nav { display: flex; gap: 4px; flex-wrap: wrap; }
+header nav a { padding: 6px 12px; border-radius: 6px; color: var(--suave); }
+header nav a.activo, header nav a:hover { background: var(--acento-suave); color: var(--acento); text-decoration: none; }
+main { max-width: 1200px; margin: 0 auto; padding: 24px 20px 60px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 28px 0 10px; }
+h3 { font-size: 15px; margin: 18px 0 8px; }
+.sub { color: var(--suave); margin: 0 0 18px; }
+.tarjeta { background: var(--panel); border: 1px solid var(--borde); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--borde);
+        border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--borde); vertical-align: top; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--suave); background: var(--gris-suave); }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+.chico { font-size: 13px; color: var(--suave); }
+.estado { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+          white-space: nowrap; background: var(--gris-suave); color: var(--suave); }
+.estado.lista, .estado.hecho { background: var(--ok-suave); color: var(--ok); }
+.estado.error { background: var(--error-suave); color: var(--error); }
+.estado.procesando, .estado.corriendo { background: var(--acento-suave); color: var(--acento); }
+.estado.esperando_usuario, .estado.grabando, .estado.parcial { background: var(--aviso-suave); color: var(--aviso); }
+.barra-progreso { width: 90px; height: 6px; background: var(--gris-suave); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.barra-progreso > span { display: block; height: 100%; background: var(--acento); }
+.error-texto { color: var(--error); font-size: 13px; }
+.aviso-texto { color: var(--aviso); font-size: 13px; }
+.msg { padding: 10px 14px; border-radius: 8px; margin-bottom: 18px; border: 1px solid; }
+.msg.ok { background: var(--ok-suave); color: var(--ok); border-color: transparent; }
+.msg.error { background: var(--error-suave); color: var(--error); border-color: transparent; }
+.msg.aviso { background: var(--aviso-suave); color: var(--aviso); border-color: transparent; }
+form.linea { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+button, .boton { font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--borde);
+         background: var(--panel); color: var(--texto); cursor: pointer; white-space: nowrap; }
+button:hover, .boton:hover { border-color: var(--acento); text-decoration: none; }
+button.primario, a.boton.primario { background: var(--acento); border-color: var(--acento); color: #fff; }
+button.peligro { color: var(--error); border-color: var(--error); }
+button.mini { padding: 2px 8px; font-size: 12px; }
+input[type=text], input[type=number], select, textarea { font: inherit; font-size: 14px; padding: 6px 8px;
+         border: 1px solid var(--borde); border-radius: 6px; background: var(--panel); color: var(--texto); }
+textarea { width: 100%; font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; }
+.campos { display: grid; grid-template-columns: 220px 1fr; gap: 12px 16px; align-items: start; }
+.campos label { font-weight: 600; padding-top: 6px; }
+.campos .ayuda { display: block; font-weight: 400; font-size: 12px; color: var(--suave); }
+.campos input[type=text] { width: 100%; }
+.campos > * { min-width: 0; }
+.campos .opcion { font-weight: 400; padding-top: 0; }
+.campos select { max-width: 100%; }
+.acciones { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+pre, .codigo { background: var(--codigo); border-radius: 8px; padding: 12px; overflow: auto; font-size: 12.5px;
+      font-family: Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; word-break: break-word; margin: 0; }
+.desplazable { max-height: 460px; overflow: auto; }
+.grilla { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.vacio { color: var(--suave); font-style: italic; }
+details > summary { cursor: pointer; font-weight: 600; }
+.etiqueta { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 4px; background: var(--gris-suave); color: var(--suave); }
+</style>
+</head>
+<body>
+<header>
+  <div class="barra">
+    <a class="marca" href="/panel/clases">Classmer</a>
+    <nav>
+      <a href="/panel/clases" {% if seccion == 'clases' %}class="activo"{% endif %}>Clases</a>
+      <a href="/panel/pendientes" {% if seccion == 'pendientes' %}class="activo"{% endif %}>Pendientes</a>
+      <a href="/panel/materias" {% if seccion == 'materias' %}class="activo"{% endif %}>Materias</a>
+      <a href="/panel/estilo" {% if seccion == 'estilo' %}class="activo"{% endif %}>Estilo</a>
+      <a href="/panel/modelos" {% if seccion == 'modelos' %}class="activo"{% endif %}>Modelos</a>
+      <a href="/panel/estado" {% if seccion == 'estado' %}class="activo"{% endif %}>Estado</a>
+    </nav>
+  </div>
+</header>
+<main>
+{% if msg %}<div class="msg {{ tipo_msg if tipo_msg in ('error', 'aviso') else 'ok' }}">{{ msg }}</div>{% endif %}
+{% block contenido %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

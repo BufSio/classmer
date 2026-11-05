@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block titulo %}Materias{% endblock %}
+{% block contenido %}
+<div class="acciones" style="justify-content: space-between">
+  <div>
+    <h1>Materias</h1>
+    <p class="sub">Se guardan en <code>{{ cfg.home }}\config.yaml</code> (conservando los comentarios) y se aplican sin reiniciar.</p>
+  </div>
+  <a class="boton" href="/panel/materias/nueva">+ Agregar materia</a>
+</div>
+{% if config_viva.error %}<div class="msg error">config.yaml tiene un error y se sigue usando la versión anterior: {{ config_viva.error }}</div>{% endif %}
+
+<table>
+  <thead><tr>
+    <th>Materia</th><th>Estado</th><th class="num">Próxima clase</th><th class="num">Clases</th><th>Calendario</th><th>Carpeta</th><th>Pendientes</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for r in materias %}
+  <tr>
+    <td><a href="/panel/materias/{{ r.m.id }}"><strong>{{ r.m.nombre }}</strong></a><div class="chico">{{ r.m.id }}{% if r.m.estilo %} · con estilo propio{% endif %}</div></td>
+    <td>{% if r.m.activa %}<span class="estado lista">activa</span>{% else %}<span class="estado">inactiva</span>{% endif %}</td>
+    <td class="num">{{ r.proximo }}</td>
+    <td class="num">{{ r.contadas }}{% if r.total != r.contadas %} <span class="chico">({{ r.total }} en total)</span>{% endif %}</td>
+    <td class="chico">
+      {% if r.m.calendario.titulo_regex %}título ~ <code>{{ r.m.calendario.titulo_regex }}</code>{% endif %}
+      {% if r.m.calendario.calendario %}<div>calendario: {{ r.m.calendario.calendario }}</div>{% endif %}
+      {% if not r.m.calendario.titulo_regex and not r.m.calendario.calendario %}<span class="vacio">sin regla</span>{% endif %}
+    </td>
+    <td class="chico">
+      {% if r.carpeta_ok %}✓ {{ r.m.carpeta_clases }}{% else %}<span class="error-texto">no existe la carpeta</span>{% endif %}
+      <div>perfil: {{ r.perfil or 'ninguno' }}</div>
+    </td>
+    <td><a href="/panel/pendientes?materia={{ r.m.id }}">{{ r.abiertos }} abiertos</a></td>
+    <td><a class="boton" href="/panel/materias/{{ r.m.id }}">Editar</a></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="vacio">No hay materias en config.yaml.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

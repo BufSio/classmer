@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block titulo %}Estilo del apunte{% endblock %}
+{% block contenido %}
+<h1>Estilo del apunte</h1>
+<p class="sub">El prompt del agente va en capas: el contrato fijo, este estilo global, el estilo de cada materia y el contexto de la clase.</p>
+
+<form method="post" action="/panel/estilo" class="tarjeta">
+  <h2 style="margin-top:0">Estilo global <span class="chico">(editable · <code>estilo_global</code> en config.yaml)</span></h2>
+  <textarea name="estilo_global" rows="10">{{ estilo_global }}</textarea>
+  <div class="acciones" style="margin-top:12px">
+    <button type="submit" class="primario">Guardar</button>
+    <span class="chico">Se usa desde el próximo apunte. El estilo de cada materia se edita en <a href="/panel/materias">Materias</a>.</span>
+  </div>
+</form>
+
+<details class="tarjeta">
+  <summary>Contrato fijo del sistema (<code>server/prompts/apunte.md</code>, sólo lectura)</summary>
+  <pre class="desplazable" style="margin-top:12px; max-height:70vh">{{ contrato }}</pre>
+</details>
+{% endblock %}
