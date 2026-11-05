@@ -29,20 +29,28 @@ end, with three rules:
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
+  WATCH["Galaxy Watch app<br/>(optional, near the lecturer)"]
   subgraph Phone["Android app"]
-    REC["Continuous recording<br/>Ogg/Opus"] --> QUEUE["Local upload queue"]
-    EVT["Photos, notes and marks<br/>with offset_ms"] --> QUEUE
-    CAL["Phone calendar"] --> SUBJ["Subject auto-fill"]
+    REC["Continuous recording<br/>Ogg/Opus"]
+    EVT["Photos, notes and marks<br/>with offset_ms"]
+    CAL["Calendar → subject"]
+    QUEUE["Local upload queue"]
+    REC --> QUEUE
+    EVT --> QUEUE
+    CAL --> QUEUE
   end
-  WATCH["Galaxy Watch app<br/>(optional, near the lecturer)"] -- "Wearable Data Layer" --> QUEUE
+  WATCH -- "Wearable Data Layer" --> REC
   QUEUE -- "resumable upload<br/>(LAN or WireGuard)" --> API
-  subgraph PC["Classmer server on the home PC"]
-    API["FastAPI"] --> DB[("SQLite<br/>state and job queue")]
-    DB --> WK["Worker"]
-    WK --> SEG["Split on<br/>silences"] --> ASR["Transcribe<br/>Gemini ASR"] --> TL["Timeline"] --> REV["Review transcript<br/>Claude"] --> NOTES["Write LaTeX notes<br/>Claude Agent SDK"] --> PUB["Compile, publish<br/>and index"]
-    MCPS["MCP server"]
-    PANEL["Web panel"]
+  subgraph PC["Server on the home PC"]
+    API["FastAPI + SQLite<br/>state and job queue"] --> SEG["Split on silences"]
+    SEG --> ASR["Transcribe<br/>Gemini ASR"]
+    ASR --> TL["Timeline"]
+    TL --> REV["Review transcript<br/>Claude"]
+    REV --> NOTES["Write LaTeX notes<br/>Claude Agent SDK"]
+    NOTES --> PUB["Compile, publish<br/>and index"]
+    API -.- MCPS["MCP server"]
+    API -.- PANEL["Web panel"]
   end
   PUB --> FOLDER["Subject folder<br/>PDF, .tex, transcript"]
   MCPS --- CLAUDE["Claude Code / Desktop"]

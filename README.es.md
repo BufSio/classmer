@@ -28,20 +28,28 @@ chat con un LLM. Classmer automatiza todo ese circuito con tres reglas:
 ## Cómo funciona
 
 ```mermaid
-flowchart LR
+flowchart TB
+  RELOJ["App del Galaxy Watch<br/>(opcional, cerca del profe)"]
   subgraph Celular["App Android"]
-    REC["Grabación continua<br/>Ogg/Opus"] --> COLA["Cola local<br/>de subida"]
-    EVT["Fotos, notas y marcas<br/>con offset_ms"] --> COLA
-    CAL["Calendario del celu"] --> MAT["Materia<br/>autocompletada"]
+    REC["Grabación continua<br/>Ogg/Opus"]
+    EVT["Fotos, notas y marcas<br/>con offset_ms"]
+    CAL["Calendario → materia"]
+    COLA["Cola local de subida"]
+    REC --> COLA
+    EVT --> COLA
+    CAL --> COLA
   end
-  RELOJ["App del Galaxy Watch<br/>(opcional, cerca del profe)"] -- "Wearable Data Layer" --> COLA
+  RELOJ -- "Wearable Data Layer" --> REC
   COLA -- "subida reanudable<br/>(LAN o WireGuard)" --> API
-  subgraph PC["Server de Classmer en la PC"]
-    API["FastAPI"] --> DB[("SQLite<br/>estado y cola de jobs")]
-    DB --> WK["Worker"]
-    WK --> SEG["Cortar en<br/>silencios"] --> ASR["Transcribir<br/>Gemini ASR"] --> TL["Línea de tiempo"] --> REV["Revisar transcript<br/>Claude"] --> AP["Apunte LaTeX<br/>Claude Agent SDK"] --> PUB["Compilar, publicar<br/>e indexar"]
-    MCPS["Servidor MCP"]
-    PANEL["Panel web"]
+  subgraph PC["Server en la PC"]
+    API["FastAPI + SQLite<br/>estado y cola de jobs"] --> SEG["Cortar en silencios"]
+    SEG --> ASR["Transcribir<br/>Gemini ASR"]
+    ASR --> TL["Línea de tiempo"]
+    TL --> REV["Revisar transcript<br/>Claude"]
+    REV --> AP["Apunte LaTeX<br/>Claude Agent SDK"]
+    AP --> PUB["Compilar, publicar<br/>e indexar"]
+    API -.- MCPS["Servidor MCP"]
+    API -.- PANEL["Panel web"]
   end
   PUB --> CARPETA["Carpeta de la materia<br/>PDF, .tex, transcript"]
   MCPS --- CLAUDE["Claude Code / Desktop"]
