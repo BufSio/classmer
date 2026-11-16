@@ -85,6 +85,11 @@
         <label class="opcion" for="apunte_esfuerzo">Esfuerzo</label>
         {{ select_esfuerzo('apunte_esfuerzo', cfg.apunte.esfuerzo, 'el default del modelo', esfuerzos) }}
       </div>
+      <div style="margin-top:8px">
+        <input type="hidden" name="apunte_web_form" value="1">
+        <label class="opcion" for="apunte_web"><input type="checkbox" id="apunte_web" name="apunte_web"{% if cfg.apunte.web.activa %} checked{% endif %}> El agente puede buscar en internet</label>
+        <div class="chico">Cuando lo crea necesario (una noticia, un dato, un paper, un nombre propio dudoso): hasta {{ cfg.apunte.web.max_busquedas }} búsquedas y {{ cfg.apunte.web.max_paginas }} páginas por apunte (los topes, en config.yaml). Lo que sume de la web va en «Agregado de Classmer», con la fuente. Vale para todas las materias.</div>
+      </div>
     </div>
   </div>
   <div class="acciones" style="margin-top:14px">

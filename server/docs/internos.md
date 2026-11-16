@@ -20,7 +20,7 @@ del server: qué archivo escribe cada etapa, con qué forma, y qué interfaces d
 | `classmer/latex.py` | `compilar(carpeta, archivo, motor, pasadas=2)`; `lecturas_externas[_en]` (filtro de lo que lee archivos de afuera). |
 | `classmer/ia/transcriptor.py` | Interfaz `Transcriptor` + Gemini (ASR y LLM) + stub de Whisper. |
 | `classmer/ia/clasificador.py` | Clasificar materia: `ClasificadorClaude` (API con JSON estructurado o plan Max por el Agent SDK) y `ClasificadorGemini`; `crear_clasificador(cfg)` elige por `clasificar.motor`. |
-| `classmer/ia/agente_apunte.py` | Runner del Claude Agent SDK con política de herramientas; `--effort`, API key sólo en el `env` de la corrida y errores separados en pasajeros y de facturación (`clasificar_error`). |
+| `classmer/ia/agente_apunte.py` | Runner del Claude Agent SDK con política de herramientas (también `WebSearch`/`WebFetch` con `apunte.web`); `--effort`, API key sólo en el `env` de la corrida y errores separados en pasajeros y de facturación (`clasificar_error`). |
 | `classmer/ia/facturacion.py` | Facturación de Claude (§7): `Facturacion(cfg, base)` decide el medio (`api`/`max`) según `claude.facturacion` y la memoria (tabla `facturacion`); `ejecutar(tarea, correr)` rehace con el otro medio ante `SinCreditos`; `costo_api`, `texto_costo`. |
 | `classmer/ia/modelos.py` | Catálogo de modelos (tablas `modelos` y `descubrimientos`): semillas, `opciones_tarea`, `redescubrir` (APIs de Anthropic y Google), `esfuerzo_para`. CLI `classmer modelos [--redescubrir]`. |
 | `classmer/ia/meta.py` | Esquema JSON de `meta.json` y validación. |
@@ -297,6 +297,71 @@ LaTeX2e y de xparse). `classmer.cls` pone
 `\includegraphics[page=2,width=\linewidth]{adjuntos/Slides_clase_5.pdf}` (o `{Slides_clase_5.pdf}`) y
 `\pizarra{adjuntos/captura.jpg}{…}{…}` andan en las dos.
 
+## Política de herramientas del agente (`ia.agente_apunte`)
+
+`_opciones` arma `ClaudeAgentOptions` con `tools` explícito, `allowed_tools=[]`,
+`permission_mode="dontAsk"`, `setting_sources=[]`, `skills=[]` y `strict_mcp_config`. El hook
+`PreToolUse` (sin matcher: todas las herramientas) llama a `decidir(nombre, entrada, estado)`; lo que no
+permite explícitamente se deniega, y ante un error de la política también. Un `allow` del hook no le gana
+a una regla deny: lo que se habilita tiene que salir de `disallowed_tools`.
+
+| Herramienta | Regla |
+|---|---|
+| `Read`, `Glob`, `Grep` | Sólo dentro de la carpeta de trabajo, la de la materia y la `tool-results` de la sesión del CLI. |
+| `Write`, `Edit` | Sólo dentro de `output/`, nunca `classmer.cls`. |
+| `Bash` | Sólo `[cd output &&] pdflatex [flags] apunte.tex` (o `lualatex`; una o dos pasadas), con tope de intentos y de tiempo; si el `.tex` lee archivos de afuera se rechaza sin gastar intento. |
+| `WebSearch` | Con `apunte.web.activa`: hasta `max_busquedas` llamadas por corrida, consulta de 300 caracteres como mucho. |
+| `WebFetch` | Con `apunte.web.activa`: hasta `max_paginas` por corrida, sólo URLs que salieron en una búsqueda de la corrida y que pasan el cinturón (abajo). |
+| Todo lo demás | Denegado (`PROHIBIDAS`: `Task`, `Agent`, MCP, `ToolSearch`, `PowerShell`, …). |
+
+`PROHIBIDAS` incluye siempre `WebSearch` y `WebFetch`: la usan tal cual `clasificador.py` y
+`claude_json.py` (clasificar y revisar el transcript, sin web). El apunte usa `herramientas(web)` y
+`prohibidas(web)`, que con la web activa las suman a `tools` y las sacan de `disallowed_tools`.
+
+**Búsqueda en internet** (`TrabajoApunte.web: WebCorrida | None`, de `WebCorrida.desde_config`; la etapa la
+calcula una vez por intento y la usa para el prompt y para la política):
+
+- **Las URLs permitidas** se juntan de los resultados de cada `WebSearch`, sólo del `tool_response` del
+  hook `PostToolUse` (matcher `WebSearch`): las de los resultados del buscador (`results[*].content[*].url`),
+  nunca las que aparecen en el texto que redacta el modelo que hace la búsqueda (ver "De dónde salen las
+  URLs" más abajo). Se guardan normalizadas (`clave_url`: esquema y host en minúscula, el host en punycode
+  si no es ASCII, http → https, sin `:443` ni `#fragmento`, camino `/` si no tiene; camino y consulta tal
+  cual).
+- **El orden de `WebFetch`:** (1) el cinturón sin red (`https`, puerto 443, sin usuario ni contraseña, sin
+  espacios ni `\`; ni una IP —tampoco las formas que el parser WHATWG del CLI lee como IPv4: `2130706433`,
+  `0x7f.1`, `127.1`—, ni `localhost`, ni un host que no sea `[a-z0-9.-]` con un punto como mínimo, ni
+  `panel.dominio_publico` o sus subdominios); (2) que la URL haya salido en una búsqueda; (3) el tope;
+  (4) que el host resuelva sólo a IPs globales (`ipaddress.is_global`, también la IPv4 mapeada). El DNS
+  va último: un nombre armado por el agente no llega ni a una consulta DNS. Un `http://` de un resultado
+  se deniega diciendo que lo pida con `https://` (sólo si con https pasaría).
+- **Topes:** con el tope alcanzado, el motivo dice que siga con lo que tiene (no corta el apunte ni gasta
+  intentos de compilación). Además, `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION` = `max_busquedas` en el
+  `env` del CLI, y `max_turns` = 80 + `max_busquedas` + `max_paginas`.
+- **Prompt:** el bloque entre `===== WEB =====` y `===== FIN WEB =====` de `prompts/apunte.md` va sólo
+  con la web activa (`apunte.con_bloque_web`), con `{max_busquedas}` y `{max_paginas}`; apagada, el
+  sistema queda como antes del bloque (misma versión).
+- **Registro:** `WebSearch '<consulta>' (búsqueda N de M)`, `→ WebSearch '<consulta>': K resultados`
+  (K, las URLs que vio el hook PostToolUse; si el hook no las vio, lo dice), `WebFetch <url> (página N
+  de M)`, `DENEGADO … : <motivo>` y los errores de la herramienta. La línea `Web:` del resumen cuenta lo
+  permitido, las denegadas y las consultas reales al buscador (`webSearchRequests` del `model_usage` del
+  `ResultMessage`, que es donde lo informa el CLI: el `usage` principal trae 0 porque la búsqueda va en
+  una consulta aparte). El `total_cost_usd` del CLI ya incluye esas consultas (USD 0,01 cada una): si el
+  CLI no informa la cantidad, la línea lo dice y el costo queda igual (no se suma nada).
+- **De dónde salen las URLs que WebFetch puede abrir:** sólo de `results[*].content[*].url` en el
+  `tool_response` del hook PostToolUse (`urls_de_resultado`). El texto del `ToolResultBlock` no cuenta:
+  repite la consulta del agente y el resumen del modelo que busca, que escribe lo que dicen las páginas,
+  así que una línea `Links: […]` ahí la puede armar una inyección. Por lo mismo, una consulta con saltos
+  de línea o caracteres de control se deniega.
+- **El hook decide en un hilo** (`asyncio.to_thread`) y de a una decisión por vez (un `asyncio.Lock`):
+  el chequeo de DNS de WebFetch bloquea y el loop tiene que seguir leyendo al CLI, y los hooks de
+  herramientas en paralelo no pueden pisarse los contadores.
+- **Nombres con caracteres no ASCII** (`münchen.de`): `clave_url` los guarda en punycode y WebFetch los
+  acepta sólo así (la política le sugiere la URL en punycode al agente). Así el nombre que se chequea es
+  el mismo al que se conecta el CLI.
+- **Errores:** una búsqueda o una página que falla llega como `ToolResultBlock` con `is_error` (el agente
+  lo ve y sigue). Nunca pasa por `clasificar_error`: un resultado web que dice "rate limit" no rehace el
+  apunte ni cambia de medio.
+
 ## Plantilla `classmer.cls`
 
 Preámbulo obligatorio del apunte (el resto es libre: cualquier paquete, cualquier estructura):
@@ -375,7 +440,10 @@ Los tests pasan versiones falsas para no llamar a Gemini ni a Claude.
   un intento de compilación; se deniega sin gastar intento si `output/` lee archivos de afuera
   (`latex.lecturas_externas`, filtro léxico: mira el texto sin comentarios y también entero, porque un
   `%` no siempre es comentario —`\url{…%20…}`, `\verb|%|`— y TeX ejecuta lo que sigue; así que una
-  lectura de afuera comentada también se rechaza).
+  lectura de afuera comentada también se rechaza). Con `apunte.web.activa`, también `WebSearch` y
+  `WebFetch` (ver "Política de herramientas del agente").
+- `prompts/apunte.md` tiene además el bloque `===== WEB =====` … `===== FIN WEB =====`, que va sólo con la
+  búsqueda en internet activa.
 - SDK del agente: `max_buffer_size = 1 GiB` (un Read de una foto vuelve en base64 dentro de UN
   mensaje del CLI; con el tope por defecto de 1 MiB una foto real del celu lo rompía). Caídas de la
   API (5xx, sin conexión) y límites del plan → `CuotaAgotada` (no se compila ni publica nada a medias).

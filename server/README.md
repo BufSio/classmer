@@ -336,10 +336,110 @@ Cada tarea usa un modelo que se elige de una lista en el panel (**Modelos**), nu
 - **Registro:** cada apunte guarda modelo, esfuerzo, facturación y costo (real con la API,
   "equivalente API" con el plan Max); cada job, con qué se pagó y cuánto.
 
+### Búsqueda en internet del apunte
+
+El agente del apunte tiene `WebSearch` y `WebFetch` para usarlas cuando lo crea necesario: contrastar
+una noticia, un dato o un paper que nombró el profe, sumar contexto o arreglar un nombre propio dudoso.
+Lo que suma de la web va en «Agregado de Classmer» (`agregadoIA`) con la fuente y el link.
+
+```yaml
+apunte:
+  web:
+    activa: true        # también en el panel: Modelos → "El agente puede buscar en internet"
+    max_busquedas: 12   # por corrida
+    max_paginas: 8      # páginas que puede abrir, por corrida
+```
+
+- **Prendida por defecto** y para todas las materias. Apagada, el agente queda como antes (ni las
+  herramientas ni la sección del prompt).
+- **`WebFetch` sólo abre páginas que salieron en una búsqueda** de la misma corrida, y nunca una IP,
+  `localhost`, la LAN, otro puerto que no sea el 443 ni el dominio del panel (detalle en
+  `docs/internos.md`). Con un tope alcanzado, el agente sigue con lo que tiene.
+- **Costo:** cada búsqueda la hace una consulta aparte con Haiku 5.5, y cada página se resume con
+  Haiku 5.5. Con la API, además, USD 0,01 por búsqueda (una llamada puede hacer hasta 8). Todo eso ya está
+  en el costo del apunte. En `agente.log` y en el log de la clase sale
+  `Web: 2 búsquedas (tope 12), 1 página (tope 8) · 3 consultas al buscador (US$ 0.03, incluido en el
+  costo)`.
+- La clasificación y la revisión del transcript no buscan en internet.
+
 ## Panel web
 
-Con el server andando, abrí <http://127.0.0.1:8000/panel> **en la PC** (desde la LAN o el
-WireGuard responde 403; no pide token).
+Con el server andando, abrí <http://127.0.0.1:8000/panel> **en la PC**: ahí no pide nada (ni
+el token de la app).
+
+**Desde otra PC de la red** (la LAN o el WireGuard del router) el panel pide una contraseña:
+
+1. En la PC del server, entrá a **Acceso** (<http://127.0.0.1:8000/panel/acceso>) y poné una
+   contraseña (al menos 8 caracteres, dos veces). La página muestra la URL para las otras PCs,
+   p. ej. `http://192.168.1.10:8000/panel`.
+2. En la otra PC, abrí esa URL y poné la contraseña. El navegador la recuerda 90 días; **Salir**
+   cierra la sesión en esa PC.
+
+- Sin contraseña puesta, desde la red responde 403, como antes.
+- **Acceso** se abre sólo en la PC del server: desde la red da 403 aunque haya sesión.
+  - **Cambiar la contraseña** o **Cerrar las sesiones de las otras PCs** hace que todas tengan que
+    volver a entrar.
+  - **Cerrar el acceso desde la red** quita la contraseña.
+- Después de 5 intentos fallidos desde una PC (o 20 entre todas) en 10 minutos, hay que esperar.
+- La contraseña se guarda como hash scrypt en `Classmer-data\panel-acceso.json`, nunca en texto
+  plano. Si te la olvidás, poné otra desde la PC. Borrar el archivo también cierra el acceso desde la
+  red.
+- Es HTTP sin cifrar, como la app en la LAN. Abrilo con la IP o con un nombre de la red (`pc`,
+  `pc.local`): con un dominio público da 403, contra DNS rebinding.
+
+**Por internet** (`https://classmer.ejemplo.com/panel`), con Cloudflare Tunnel y Cloudflare Access
+adelante. La parte de Cloudflare se arma en Cloudflare, fuera del repo: `cloudflared` como servicio en
+esta PC, la ruta del túnel a `http://127.0.0.1:8000` sólo para `^/panel(/.*)?$`, y una aplicación de
+Access con el código por mail para el mail del usuario. En el server:
+
+1. En `config.yaml`, la sección `panel` (ver `config.example.yaml`):
+   ```yaml
+   panel:
+     dominio_publico: panel.ejemplo.com
+     cloudflare_access:
+       equipo: mi-equipo.cloudflareaccess.com
+       aud: <AUD de la aplicación de Access>
+       emails: [alguien@ejemplo.com]
+   ```
+   Se lee sin reiniciar. Sin `dominio_publico`, o sin `cloudflare_access` completo, por el dominio da
+   403.
+2. La contraseña es la misma de **Acceso**; sin contraseña, por el dominio también da 403.
+
+- Hacen falta tres cosas: pasar Access (el código por mail), el JWT de Access, que el server valida en
+  cada pedido (firma, `aud`, `iss`, vencimiento y que el mail esté en `emails`), y la contraseña
+  (los invitados, abajo, no la usan).
+  Sin JWT válido da 403; si no se pueden bajar las claves de Access, 503.
+- Se acepta sólo ese dominio, con el `Host` exacto. Un pedido con encabezados de Cloudflare y otro
+  `Host` (otro dominio, `127.0.0.1`, una IP) da 403.
+- Por el dominio, **Acceso** da 403 y la cookie va con `Secure`. El tope de intentos cuenta la IP real
+  (`Cf-Connecting-IP`).
+- **Acceso** (en la PC) muestra la URL pública y si se pudieron bajar las claves de Access.
+- Cloudflare corta las subidas de más de 100 MB: los audios largos se importan desde la LAN.
+- La app, el MCP y `/api` no pasan por el dominio.
+
+**Invitados de sólo lectura** (por el dominio). Un mail de `panel.invitados` entra sólo con Access (el
+código por mail y el JWT, que valida el server), sin la contraseña del panel:
+```yaml
+panel:
+  # … dominio_publico y cloudflare_access como arriba (`emails` son los dueños)
+  invitados:
+    - email: invitado@ejemplo.com
+      materias: [analisis, macro]
+```
+- Ve las clases y los pendientes de sus materias: el apunte (PDF, .tex y versiones anteriores), los
+  transcripts, el audio y el del celu, las fotos y los adjuntos, y los baja con un nombre legible
+  (`?descargar=1`, por ejemplo `Macro 2026-11-05 - apunte.pdf`). No ve las notas ni las marcas de la
+  app, ni nada de cómo se procesó la clase (jobs, costos, log, errores, dónde se publica, la
+  importación, la revisión), ni las páginas de configuración.
+- Sólo GET y HEAD, y sólo una lista blanca de rutas (`RUTAS_INVITADO`): lo demás da 403, también
+  una ruta nueva hasta que alguien la sume. Una clase de otra materia (o sin materia) da 404.
+- El rol sale del mail del JWT en cada pedido: una cookie de dueño no lo hace dueño, y `/panel/entrar`
+  lo manda a las clases (el POST da 403). Sacarlo de la config lo deja afuera en el pedido siguiente.
+- **Invitados** (en la barra del dueño, en la PC, la LAN o el dominio): sumar o sacar invitados y
+  elegir qué materias ve cada uno; escribe `panel.invitados` en `config.yaml` sin reiniciar. Muestra la
+  última vez que entró cada uno (desde el último reinicio). Para que un mail nuevo entre, también tiene
+  que estar en la policy de Cloudflare Access de la aplicación "Panel Classmer".
+- El log anota cada página que abre un invitado, con el mail y la IP (no cada pedazo del audio).
 
 - **Clases:** estado, etapa, progreso y errores. En cada clase: la versión vigente del apunte (PDF y
   .tex, con modelo, esfuerzo, facturación y costo), las versiones anteriores con su PDF, audio con
@@ -492,6 +592,7 @@ Codex también acepta el servidor HTTP directo (`url = "http://127.0.0.1:8000/mc
 ```
 Classmer-data/
   config.yaml, .env         configuración y secretos (fuera del repo)
+  panel-acceso.json         contraseña del panel desde la red (hash scrypt) y secreto de las cookies
   classmer.db               SQLite (WAL): índice y estado, cola de jobs
   sesiones/<id>/            audio, fotos, eventos, bloques, transcript, timeline, apunte/vN/
                             audio.celu.<ext>, bloques_celu/, transcript.celu.*  ← la segunda pista

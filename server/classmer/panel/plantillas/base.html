@@ -84,6 +84,15 @@ pre, .codigo { background: var(--codigo); border-radius: 8px; padding: 12px; ove
 .grilla { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
 .vacio { color: var(--suave); font-style: italic; }
 details > summary { cursor: pointer; font-weight: 600; }
+header form.salir { margin: 0 0 0 auto; }
+header form.salir button { border-color: transparent; color: var(--suave); background: transparent; }
+header form.salir button:hover { color: var(--acento); border-color: var(--acento); }
+header .solo-lectura { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+header a.salir-access { border-color: transparent; color: var(--suave); background: transparent; }
+header a.salir-access:hover { color: var(--acento); border-color: var(--acento); }
+a.bajar { font-size: 12px; white-space: nowrap; }
+input[type=password] { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--borde);
+         border-radius: 6px; background: var(--panel); color: var(--texto); }
 .etiqueta { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 4px; background: var(--gris-suave); color: var(--suave); }
 </style>
 </head>
@@ -91,6 +100,15 @@ details > summary { cursor: pointer; font-weight: 600; }
 <header>
   <div class="barra">
     <a class="marca" href="/panel/clases">Classmer</a>
+    {% if invitado %}
+    {# Sólo lectura (por el dominio): Clases y Pendientes. Salir cierra la sesión de Cloudflare Access. #}
+    <nav>
+      <a href="/panel/clases" {% if seccion == 'clases' %}class="activo"{% endif %}>Clases</a>
+      <a href="/panel/pendientes" {% if seccion == 'pendientes' %}class="activo"{% endif %}>Pendientes</a>
+    </nav>
+    <span class="chico solo-lectura">Sólo lectura · {{ invitado.email }}</span>
+    <a class="boton salir-access" href="/cdn-cgi/access/logout" title="Cerrar la sesión de Cloudflare Access">Salir</a>
+    {% elif not sin_nav %}
     <nav>
       <a href="/panel/clases" {% if seccion == 'clases' %}class="activo"{% endif %}>Clases</a>
       <a href="/panel/pendientes" {% if seccion == 'pendientes' %}class="activo"{% endif %}>Pendientes</a>
@@ -98,7 +116,17 @@ details > summary { cursor: pointer; font-weight: 600; }
       <a href="/panel/estilo" {% if seccion == 'estilo' %}class="activo"{% endif %}>Estilo</a>
       <a href="/panel/modelos" {% if seccion == 'modelos' %}class="activo"{% endif %}>Modelos</a>
       <a href="/panel/estado" {% if seccion == 'estado' %}class="activo"{% endif %}>Estado</a>
+      <a href="/panel/invitados" {% if seccion == 'invitados' %}class="activo"{% endif %}>Invitados</a>
+      {% if desde_la_pc %}
+      <a href="/panel/acceso" {% if seccion == 'acceso' %}class="activo"{% endif %}>Acceso</a>
+      {% endif %}
     </nav>
+    {% if not desde_la_pc %}
+    <form method="post" action="/panel/salir" class="salir">
+      <button type="submit" title="Cerrar la sesión del panel en esta PC">Salir</button>
+    </form>
+    {% endif %}
+    {% endif %}
   </div>
 </header>
 <main>

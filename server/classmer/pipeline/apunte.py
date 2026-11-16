@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from classmer import adjuntos, latex
 from classmer.config import PROMPTS_DIR
-from classmer.ia.agente_apunte import AgenteClaude, ResultadoAgente, TrabajoApunte
+from classmer.ia.agente_apunte import AgenteClaude, ResultadoAgente, TrabajoApunte, WebCorrida
 from classmer.ia.facturacion import ETIQUETA_MEDIO, Facturacion, texto_costo
 from classmer.ia.gemini import rellenar
 from classmer.ia.meta import leer_meta, meta_desde_tex, reparar_meta, validar_datos, validar_meta
@@ -50,6 +50,10 @@ if TYPE_CHECKING:
 
 PROMPT = "apunte"
 SEPARADOR = "===== MENSAJE ====="
+# El bloque de la búsqueda en internet del sistema: va sólo con apunte.web.activa (sin las líneas de marca).
+_BLOQUE_WEB = re.compile(r"^===== WEB =====\n.*?^===== FIN WEB =====\n\n?", re.M | re.S)
+_MARCAS_WEB = re.compile(r"^===== (?:FIN )?WEB =====\n", re.M)
+_DE_LA_CONFIG: Any = object()  # armar_prompt sin `web`: la de la config
 MAX_PERFIL = 15_000        # caracteres del perfil que van en el mensaje (el archivo va entero)
 MAX_TIMELINE = 400_000     # más que esto, el agente lee el resto de input/timeline.md
 MAX_LISTA_ADJUNTOS = 12    # adjuntos que se nombran en el mensaje (los demás están en input/timeline.md)
@@ -112,7 +116,9 @@ def ejecutar(ctx: Contexto, job: Job) -> Resultado:
         fotos, material = preparar_carpeta(cfg, workdir, carpeta, materia, contexto, anterior,
                                            base=ctx.base, sesion_id=sid, job_id=job.id)
         usados.append([p.adjunto["id"] for p in material])
-        sistema, mensaje, version, contenido = armar_prompt(cfg, materia, contexto, workdir, fotos, material=material)
+        web = WebCorrida.desde_config(cfg)  # la misma para el prompt y para la política de esta corrida
+        sistema, mensaje, version, contenido = armar_prompt(cfg, materia, contexto, workdir, fotos, material=material,
+                                                            web=web)
         if not versiones:
             with ctx.base.conexion() as conn:
                 registrar_prompt(conn, version, contenido, cfg.zona_horaria)
@@ -140,6 +146,7 @@ def ejecutar(ctx: Contexto, job: Job) -> Resultado:
             duracion_ms=duracion,
             esfuerzo=esfuerzo,
             facturacion=medio,
+            web=web,
         )
         try:
             return agente.ejecutar(trabajo)
@@ -410,11 +417,18 @@ def cargar_prompt(carpeta: Path | None = None) -> tuple[str, str]:
 
 def armar_prompt(cfg: Config, materia: Materia, contexto: dict[str, Any], workdir: Path,
                  fotos: list[str], *, material: list[adjuntos.Preparado] | None = None,
-                 carpeta_prompts: Path | None = None) -> tuple[str, str, str, str]:
-    """(sistema, mensaje, versión, contenido versionado) con las capas de §7 rellenas."""
+                 carpeta_prompts: Path | None = None, web: WebCorrida | None = _DE_LA_CONFIG,
+                 ) -> tuple[str, str, str, str]:
+    """(sistema, mensaje, versión, contenido versionado) con las capas de §7 rellenas. `web`: la búsqueda en
+    internet de la corrida (None: apagada; sin pasarla, la de la config); el bloque WEB va sólo si hay."""
+    if web is _DE_LA_CONFIG:
+        web = WebCorrida.desde_config(cfg)
     plantilla_sistema, plantilla_mensaje = cargar_prompt(carpeta_prompts)
+    plantilla_sistema = con_bloque_web(plantilla_sistema, web is not None)
     sistema = rellenar(
         plantilla_sistema,
+        max_busquedas=web.max_busquedas if web else None,
+        max_paginas=web.max_paginas if web else None,
         motor_latex=cfg.apunte.motor_latex,
         max_intentos=cfg.apunte.max_intentos_compilacion,
         tope_min=f"{cfg.apunte.tope_correccion_min:g}",
@@ -454,6 +468,12 @@ def armar_prompt(cfg: Config, materia: Materia, contexto: dict[str, Any], workdi
         timeline=timeline.strip(),
     )
     return sistema, mensaje, version, contenido
+
+
+def con_bloque_web(sistema: str, activa: bool) -> str:
+    """El sistema con el bloque de la búsqueda en internet (sin sus líneas de marca) o sin él, entero: con la
+    web apagada queda igual que antes del bloque."""
+    return _MARCAS_WEB.sub("", sistema) if activa else _BLOQUE_WEB.sub("", sistema)
 
 
 def texto_adjuntos(material: list[adjuntos.Preparado]) -> str:

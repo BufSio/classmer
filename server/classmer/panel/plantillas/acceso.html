@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block titulo %}Acceso desde la red{% endblock %}
+{% block contenido %}
+<h1>Acceso desde la red</h1>
+<p class="sub">En esta PC el panel se abre sin nada. Desde las otras PCs de la red (la LAN o el WireGuard del router) pide una contraseña, y cada navegador la recuerda {{ dias }} días. Esta página sólo se abre desde esta PC.</p>
+
+<div class="tarjeta">
+  {% if estado.abierto %}
+  <p style="margin-top:0"><span class="estado lista">abierto</span>
+    Las otras PCs entran con la contraseña{% if estado.puesta %} (puesta o cambiada el {{ estado.puesta | fecha }}){% endif %}.</p>
+  {% if urls %}
+  <p>Desde otra PC, abrí
+    {% for u in urls %}{% if loop.first %}<strong><a href="{{ u }}">{{ u }}</a></strong>{% endif %}{% endfor %}
+    {% if urls | length > 1 %}<br><span class="chico">Otras IPs de esta PC (una VPN, otra placa de red):
+      {% for u in urls[1:] %}<code>{{ u }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
+  </p>
+  {% else %}
+  <p class="aviso-texto">No encontré la IP de esta PC en la red: fijate con <code>ipconfig</code> y abrí <code>http://&lt;IP&gt;:{{ puerto }}/panel</code>.</p>
+  {% endif %}
+  {% if fallidos %}<p class="aviso-texto">Intentos fallidos de entrar en los últimos 10 minutos: {{ fallidos }}.</p>{% endif %}
+  <p class="chico" style="margin-bottom:0">Es HTTP, sin cifrar, como la app en la LAN: la contraseña viaja por tu red.
+    {% if estado.sesiones_desde and estado.sesiones_desde != estado.puesta %}Las sesiones se cerraron por última vez el {{ estado.sesiones_desde | fecha }}.{% endif %}</p>
+  {% else %}
+  <p style="margin-top:0"><span class="estado">cerrado</span>
+    No hay contraseña: desde las otras PCs el panel responde 403. Poné una para abrirlo.</p>
+  {% if estado.error %}<p class="error-texto">{{ estado.error }}.</p>{% endif %}
+  {% endif %}
+</div>
+
+<div class="tarjeta">
+  <h2 style="margin-top:0">Por internet</h2>
+  {% if url_publica %}
+  <p style="margin-top:0"><span class="estado {{ 'lista' if estado.abierto else '' }}">{{ 'abierto' if estado.abierto else 'sin contraseña' }}</span>
+    Desde cualquier lado: <strong><a href="{{ url_publica }}">{{ url_publica }}</a></strong>.
+    Pasa por Cloudflare Access (el código por mail), después pide esta misma contraseña, y el server valida el pase de Access en cada pedido.
+    {% if not estado.abierto %}Sin contraseña, por el dominio también da 403.{% endif %}</p>
+  {% if pedido_claves %}
+  <p class="chico {{ '' if pedido_claves.ok else 'aviso-texto' }}">Claves de Cloudflare Access:
+    {% if pedido_claves.ok %}bajadas el {{ pedido_claves.cuando | fecha }} ({{ pedido_claves.detalle }}).
+    {% else %}no se pudieron bajar el {{ pedido_claves.cuando | fecha }}: {{ pedido_claves.detalle }}.{% endif %}</p>
+  {% else %}
+  <p class="chico">Las claves de Cloudflare Access se bajan con el primer pedido por el dominio.</p>
+  {% endif %}
+  <p class="chico" style="margin-bottom:0">Por el dominio se sube hasta {{ tope_dominio_mb }} MB por vez (lo corta Cloudflare): los audios largos, desde la LAN.</p>
+  {% elif dominio_publico %}
+  <p style="margin-top:0"><span class="estado">cerrado</span>
+    Está configurado <code>{{ dominio_publico }}</code> pero falta <code>panel.cloudflare_access</code> completo (equipo, aud y emails) en <code>config.yaml</code>: por el dominio da 403.</p>
+  {% else %}
+  <p style="margin-top:0;margin-bottom:0"><span class="estado">cerrado</span>
+    No hay dominio público configurado (<code>panel.dominio_publico</code> en <code>config.yaml</code>): el panel no se abre desde internet.</p>
+  {% endif %}
+</div>
+
+<form method="post" action="/panel/acceso/contrasena" class="tarjeta">
+  <h2 style="margin-top:0">{{ 'Cambiar la contraseña' if estado.abierto else 'Poner una contraseña' }}</h2>
+  <div class="campos">
+    <label for="contrasena">Contraseña nueva <span class="ayuda">al menos {{ min_contrasena }} caracteres</span></label>
+    <input type="password" id="contrasena" name="contrasena" autocomplete="new-password" required minlength="{{ min_contrasena }}" style="max-width:320px">
+    <label for="repetida">Otra vez</label>
+    <input type="password" id="repetida" name="repetida" autocomplete="new-password" required minlength="{{ min_contrasena }}" style="max-width:320px">
+  </div>
+  <div class="acciones" style="margin-top:12px">
+    <button type="submit" class="primario">{{ 'Cambiar' if estado.abierto else 'Poner y abrir el acceso' }}</button>
+    {% if estado.abierto %}<span class="chico">Al cambiarla, las otras PCs tienen que entrar de nuevo.</span>{% endif %}
+  </div>
+</form>
+
+{% if estado.abierto %}
+<div class="tarjeta">
+  <h2 style="margin-top:0">Sesiones y acceso</h2>
+  <div class="acciones">
+    <form class="linea" method="post" action="/panel/acceso/cerrar-sesiones"
+          onsubmit="return confirm('Las otras PCs van a tener que poner la contraseña de nuevo. ¿Seguir?')">
+      <button type="submit">Cerrar las sesiones de las otras PCs</button>
+    </form>
+    <form class="linea" method="post" action="/panel/acceso/cerrar"
+          onsubmit="return confirm('Se quita la contraseña y el panel vuelve a abrirse sólo en esta PC. ¿Seguir?')">
+      <button type="submit" class="peligro">Cerrar el acceso desde la red</button>
+    </form>
+  </div>
+  <p class="chico" style="margin-bottom:0">Cerrar las sesiones deja la misma contraseña. Cerrar el acceso la quita: para volver a abrirlo, poné una nueva.</p>
+</div>
+{% endif %}
+{% endblock %}

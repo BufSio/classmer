@@ -8,8 +8,10 @@
 - Si una edición a mano deja el archivo inválido, se sigue con la config anterior y el error se
   ve en el panel (Estado).
 - `home`, `datos` y `servidor` sólo cambian al reiniciar.
-- Página Modelos del panel (`editar_modelos`): modelo, motor y esfuerzo por tarea y la facturación
+- Página Modelos del panel (`editar_modelos`): modelo, motor y esfuerzo por tarea, el casillero de la
+  búsqueda en internet del apunte (`apunte.web.activa`; los topes sólo en el YAML) y la facturación
   de Claude. El modelo propio del apunte de una materia va en `editar_materia(…, {"apunte": …})`.
+- Página Invitados del panel (`poner_invitado`, `sacar_invitado`): sólo `panel.invitados`.
 """
 
 from __future__ import annotations
@@ -43,16 +45,19 @@ from classmer.config import (
     REVISION_DEFAULT,
     TIPOS_REVISION,
     Apunte,
+    ApunteWeb,
     Clasificar,
     Claude,
     Config,
     ConfigError,
     Materia,
     ModeloApunte,
+    Panel,
     RevisarTranscript,
     Transcribir,
     cargar_config,
     config_desde_texto,
+    mail_valido,
     tipo_revision,
 )
 from classmer.util import ahora_iso, escribir_atomico
@@ -72,7 +77,7 @@ CAMPOS_MODELOS: dict[str, tuple[str, ...]] = {
     "transcribir": ("modelo",),
     "clasificar": ("motor", "modelo", "esfuerzo", "umbral_confianza"),
     "revisar_transcript": ("modelo", "esfuerzo"),
-    "apunte": ("modelo", "esfuerzo"),
+    "apunte": ("modelo", "esfuerzo", "web"),   # web: el casillero apunte.web.activa
     "claude": ("facturacion", "reintentar_api_h"),
 }
 _CLASE_SECCION: dict[str, type[BaseModel]] = {
@@ -395,6 +400,10 @@ def _normalizar_modelos(cambios: Mapping[str, Any]) -> dict[str, dict[str, Any]]
             nombre = f"{seccion}.{clave}"
             if clave == "esfuerzo":
                 valores[clave] = _esfuerzo(valor, nombre)
+            elif clave == "web":
+                if not isinstance(valor, bool):
+                    raise ConfigError(f"{nombre} tiene que ser true o false")
+                valores[clave] = valor
             elif clave == "umbral_confianza":
                 valores[clave] = _numero(valor, nombre)
                 if not 0 <= valores[clave] <= 1:
@@ -426,6 +435,9 @@ def _aplicar_seccion(doc: CommentedMap, seccion: str, valores: dict[str, Any]) -
         raise ConfigError(f"`{seccion}` tiene que ser un mapa en config.yaml")
     mapa = actual if actual is not None else CommentedMap()
     for clave, valor in valores.items():
+        if seccion == "apunte" and clave == "web":
+            _poner_web(mapa, valor, campos)
+            continue
         if clave in mapa:
             if not _igual(mapa[clave], valor):
                 mapa[clave] = _con_estilo(mapa[clave], valor)
@@ -438,6 +450,29 @@ def _aplicar_seccion(doc: CommentedMap, seccion: str, valores: dict[str, Any]) -
         else:
             pos = _posicion(doc, seccion, list(Config.model_fields))
         _insertar(doc, pos, seccion, mapa, separar=True)
+
+
+def _poner_web(apunte: CommentedMap, activa: bool, campos: list[str]) -> None:
+    """`apunte.web.activa` (el casillero de Modelos), sin tocar los topes ni lo demás de `web:`. Si no hay
+    `web:` y queda en el default (prendida), no se escribe nada."""
+    web = apunte.get("web")
+    default = ApunteWeb.model_fields["activa"].default
+    if isinstance(web, CommentedMap):
+        if "activa" in web:
+            _poner(web, "activa", activa)
+        elif activa != default:
+            _insertar(web, 0, "activa", activa)  # arriba de los topes
+        return
+    if activa == default and web is None:
+        return  # sin `web:` (o `web: null`) ya vale el default
+    nuevo = CommentedMap()
+    nuevo["activa"] = activa
+    if "web" in apunte:  # `web: null` u otra cosa escrita a mano
+        pos = list(apunte).index("web")
+        _quitar(apunte, "web")
+    else:
+        pos = _posicion(apunte, "web", campos)
+    _insertar(apunte, pos, "web", nuevo)
 
 
 def _verificar_modelos(cfg: Config, secciones: set[str]) -> None:
@@ -586,6 +621,101 @@ def _apunte_crudo(valor: Any) -> dict[str, Any] | None:
     return {"modelo": str(valor["modelo"]), "esfuerzo": valor.get("esfuerzo") or None}
 
 
+# --- invitados del panel (panel.invitados) ----------------------------------------------------
+
+def mail_invitado(valor: Any) -> str:
+    """El mail de un invitado como va en config.yaml: sin espacios alrededor y en minúscula."""
+    texto = str(valor or "").strip().lower()
+    if not mail_valido(texto):
+        raise ConfigError(f"{str(valor or '').strip()!r} no es un mail")
+    return texto
+
+
+def _lista_flujo(valores: list[str]) -> CommentedSeq:
+    seq = CommentedSeq(valores)
+    seq.fa.set_flow_style()
+    return seq
+
+
+def _invitados_doc(doc: CommentedMap) -> tuple[CommentedMap | None, CommentedSeq | None]:
+    """(`panel`, `panel.invitados`) del documento, o None donde no están."""
+    panel = doc.get("panel")
+    if panel is None:
+        return None, None
+    if not isinstance(panel, CommentedMap):
+        raise ConfigError("`panel` tiene que ser un mapa en config.yaml")
+    lista = panel.get("invitados")
+    if lista is not None and not isinstance(lista, CommentedSeq):
+        raise ConfigError("`panel.invitados` tiene que ser una lista en config.yaml")
+    return panel, lista
+
+
+def _ultimo_portador(item: Any) -> tuple[Any, Any, int] | None:
+    """Dónde guarda ruamel los comentarios que siguen a un invitado (la última clave de su mapa)."""
+    if isinstance(item, CommentedMap) and len(item):
+        return _portador(item, list(item)[-1])
+    return None
+
+
+def _agregar_invitado(doc: CommentedMap, nuevo: CommentedMap) -> None:
+    """Suma un invitado al final de `panel.invitados` (y crea la lista o `panel` si faltan). Lo que
+    estaba abajo del último (el comentario de la sección siguiente) queda abajo del nuevo."""
+    panel, lista = _invitados_doc(doc)
+    if lista is not None and len(lista):
+        abajo = ""
+        portador = _ultimo_portador(lista[-1])
+        if portador is not None:
+            linea, abajo = _partir(*portador)
+            if abajo:
+                _fijar(*portador, linea, "")
+        lista.append(nuevo)
+        if abajo:
+            _fijar(*_portador(nuevo, list(nuevo)[-1]), "", abajo)
+        return
+    seq = CommentedSeq([nuevo])
+    if panel is None:
+        mapa = CommentedMap()
+        mapa["invitados"] = seq
+        if "panel" in doc:  # `panel: null` escrito a mano
+            pos = list(doc).index("panel")
+            _quitar(doc, "panel")
+        else:
+            pos = _posicion(doc, "panel", list(Config.model_fields))
+        _insertar(doc, pos, "panel", mapa, separar=True)
+    elif "invitados" in panel:  # `invitados: []` o `invitados:` sin nada
+        _, abajo = _partir(*_portador(panel, "invitados"))
+        panel["invitados"] = seq
+        if abajo:
+            _fijar(*_portador(panel, "invitados"), "", abajo)
+    else:
+        _insertar(panel, _posicion(panel, "invitados", list(Panel.model_fields)), "invitados", seq)
+
+
+def _sacar_de_la_lista(panel: CommentedMap, lista: CommentedSeq, i: int) -> None:
+    """Saca el invitado `i`; lo que estaba abajo de él pasa al anterior (o a `invitados:` si era el único)."""
+    portador = _ultimo_portador(lista[i])
+    abajo = _partir(*portador)[1] if portador is not None else ""
+    del lista[i]
+    if not len(lista):
+        # `invitados: []`. ruamel guarda lo que sigue a una lista en bloque en su `end`, y una lista vacía
+        # no lo escribe: pasa a la clave.
+        lista.fa.set_flow_style()
+        fin = getattr(lista.ca, "end", None) or []
+        abajo = "".join(t.value for t in fin if isinstance(t, CommentToken)) + abajo
+        lista.ca.end = None
+    if not abajo:
+        return
+    if i > 0:
+        destino = _ultimo_portador(lista[i - 1])
+    elif not len(lista):
+        destino = (panel, "invitados", 2)
+    else:
+        destino = None  # era el primero de varios: lo de abajo era un comentario suyo
+    if destino is not None:
+        linea, propio = _partir(*destino)
+        _fijar(*destino, linea, propio + abajo)
+
+
 # --- config viva -------------------------------------------------------------------------------
 
 def _firma(home: Path) -> tuple[Any, ...]:
@@ -714,7 +844,7 @@ class ConfigViva:
 
     def editar_modelos(self, cambios: Mapping[str, Mapping[str, Any]]) -> Config:
         """Página Modelos: `{"transcribir": {modelo}, "clasificar": {motor, modelo, esfuerzo,
-        umbral_confianza}, "revisar_transcript": {modelo, esfuerzo}, "apunte": {modelo, esfuerzo},
+        umbral_confianza}, "revisar_transcript": {modelo, esfuerzo}, "apunte": {modelo, esfuerzo, web},
         "claude": {facturacion, reintentar_api_h}}`
         (cualquier subconjunto). Esfuerzo vacío o None = null. Toca sólo las claves que cambian y
         crea la sección que falte; sin cambios no escribe. Devuelve la config viva (ya aplicada)."""
@@ -790,3 +920,62 @@ class ConfigViva:
             doc["estilo_global"] = valor
             self._escribir(doc, formato)
 
+    # --- invitados (página Invitados del panel) ---
+    def _validar_invitado(self, email: str, materias: list[str]) -> list[str]:
+        """Las materias en el orden de config.yaml; ConfigError con un mensaje para mostrar si algo no vale
+        (después igual se valida la config entera antes de escribir)."""
+        if email in self.cfg.panel.cloudflare_access.emails:
+            raise ConfigError(f"{email} es un dueño (está en panel.cloudflare_access.emails): no puede ser invitado")
+        ids = [m.id for m in self.cfg.materias]
+        faltan = [m for m in materias if m not in ids]
+        if faltan:
+            raise ConfigError(f"no hay materia con id {', '.join(map(repr, faltan))}")
+        return [m for m in ids if m in set(materias)]
+
+    def poner_invitado(self, email: Any, materias: list[str], *, nuevo: bool) -> str:
+        """Agrega un invitado (`nuevo`) o le cambia las materias. Toca sólo `panel.invitados`. Devuelve
+        el mail como quedó (en minúscula)."""
+        email = mail_invitado(email)
+        materias = self._validar_invitado(email, [str(m).strip() for m in materias])
+        with _lock_escritura:
+            doc, formato = leer_documento(self.cfg.home)
+            _, lista = _invitados_doc(doc)
+            actual = next((x for x in (lista or []) if isinstance(x, CommentedMap)
+                           and str(x.get("email") or "").strip().lower() == email), None)
+            if nuevo:
+                if actual is not None:
+                    raise ConfigError(f"{email} ya es invitado: cambiale las materias en su fila")
+                mapa = CommentedMap()
+                mapa["email"] = email
+                mapa["materias"] = _lista_flujo(materias)
+                _agregar_invitado(doc, mapa)
+            else:
+                if actual is None:
+                    raise ConfigError(f"{email} ya no es invitado (¿lo sacaron desde otra pestaña?)")
+                if isinstance(actual.get("materias"), CommentedSeq):
+                    if list(actual["materias"]) == materias:
+                        return email
+                    actual["materias"][:] = materias
+                else:
+                    actual["materias"] = _lista_flujo(materias)
+            self._escribir(doc, formato)
+        log.info("panel: invitado %s %s: %s", email, "agregado" if nuevo else "cambiado",
+                 ", ".join(materias) or "sin materias")
+        return email
+
+    def sacar_invitado(self, email: Any) -> bool:
+        """Saca un invitado de `panel.invitados` (queda afuera en el pedido siguiente). False si no estaba."""
+        email = str(email or "").strip().lower()
+        with _lock_escritura:
+            doc, formato = leer_documento(self.cfg.home)
+            panel, lista = _invitados_doc(doc)
+            for i, x in enumerate(lista or []):
+                if isinstance(x, CommentedMap) and str(x.get("email") or "").strip().lower() == email:
+                    break
+            else:
+                return False
+            assert panel is not None and lista is not None
+            _sacar_de_la_lista(panel, lista, i)
+            self._escribir(doc, formato)
+        log.info("panel: invitado %s sacado", email)
+        return True

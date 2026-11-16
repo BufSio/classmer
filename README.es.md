@@ -135,9 +135,17 @@ Codex sin dejar el token escrito en su configuración.
   materia.
 - Importar una clase que no se grabó con la app, como un audio de WhatsApp con fotos y PDFs. Las
   fotos se ubican en la línea de tiempo por su hora EXIF.
-- Un panel web (sólo desde la PC) con las clases, el audio desde cualquier minuto, la revisión del
-  transcript, los adjuntos, las materias, los modelos y los pendientes. La config YAML se edita en
-  vivo y conserva sus comentarios.
+- Un panel web con las clases, el audio desde cualquier minuto, la revisión del transcript, los
+  adjuntos, las materias, los modelos y los pendientes. La config YAML se edita en vivo y conserva sus
+  comentarios. En la PC del server se abre sin login; desde la red local, con una contraseña; y, si se
+  configura, desde internet por Cloudflare Tunnel y Access, con el JWT de Access validado por el
+  server en cada pedido.
+- Invitados de sólo lectura: un compañero entra por Cloudflare Access y ve sólo las clases de las
+  materias que le habilito, detrás de una lista blanca de rutas en el server.
+- Búsqueda en internet para el agente del apunte, para contrastar una cifra o una noticia con su
+  fuente. Un hook decide cada llamada: el agente sólo puede abrir páginas que salieron en una búsqueda
+  de la misma corrida, nunca una IP, localhost ni la red local, y lo que viene de la web se cita como
+  tal.
 - Una tarea programada de Windows que corre el server sin ventana, lo levanta si se cae y nunca
   arranca dos.
 

@@ -172,10 +172,20 @@ def crear_app(
     app.add_middleware(Autorizacion, cfg=cfg)
     from classmer.mcp import crear_router as router_mcp  # MCP en /mcp (§11), con su propio chequeo de token
     app.include_router(router_mcp(cfg))
-    from classmer.panel import SoloLocal, crear_router  # panel en /panel (§13), sólo desde la PC
+    # Panel en /panel (§13): desde la PC sin nada; desde la red, con la contraseña de /panel/acceso.
+    # Por el dominio público (Cloudflare Tunnel + Access), además, el JWT de Access en cada pedido.
+    # Los invitados de sólo lectura (panel.invitados) entran sólo por el dominio, sin contraseña.
+    from classmer.panel import AccesoPanel, VisitasInvitados, crear_router
+    from classmer.panel.acceso import Acceso
+    from classmer.panel.cloudflare import VerificadorAccess
 
-    app.add_middleware(SoloLocal)
-    app.include_router(crear_router(cfg))
+    app.state.acceso = Acceso(cfg.home)
+    app.state.verificador_access = VerificadorAccess()
+    app.state.visitas_invitados = VisitasInvitados()
+    app.add_middleware(AccesoPanel, acceso=app.state.acceso, cfg=cfg, verificador=app.state.verificador_access,
+                       visitas=app.state.visitas_invitados)
+    app.include_router(crear_router(cfg, app.state.acceso, app.state.verificador_access,
+                                    app.state.visitas_invitados))
 
     def autorizar(request: Request) -> None:
         if not token_valido(cfg.token, request.headers.get("authorization", "")):

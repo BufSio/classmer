@@ -218,6 +218,166 @@ class Servidor(_Modelo):
     port: int = 8000
 
 
+_ETIQUETA_DNS_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+def _nombre_dns(valor: str, campo: str) -> str:
+    """Un nombre DNS público en minúsculas (sin esquema, puerto ni ruta), con al menos un punto."""
+    nombre = valor.strip().lower().rstrip(".")
+    if not nombre.isascii() or len(nombre) > 253 or "." not in nombre or \
+            not all(_ETIQUETA_DNS_RE.match(e) for e in nombre.split(".")):
+        raise ValueError(f"{campo} tiene que ser un nombre de dominio, como panel.ejemplo.com "
+                         f"(sin https://, puerto ni ruta): {valor!r}")
+    if nombre.endswith((".local", ".lan", ".home.arpa", ".localhost")) or nombre.replace(".", "").isdigit():
+        raise ValueError(f"{campo} tiene que ser un dominio público, no una IP ni un nombre de la LAN: {valor!r}")
+    return nombre
+
+
+class CloudflareAccess(_Modelo):
+    """El tercer candado del panel por el dominio (§14): el JWT que Cloudflare Access pone en cada pedido."""
+
+    equipo: str | None = None              # <equipo>.cloudflareaccess.com
+    aud: str | None = None                 # el "Application Audience (AUD) Tag" de la aplicación
+    emails: list[str] = Field(default_factory=list)
+
+    @field_validator("equipo", mode="before")
+    @classmethod
+    def _equipo(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if not isinstance(v, str):
+            raise ValueError("panel.cloudflare_access.equipo tiene que ser un texto")
+        texto = v.strip()
+        if texto.lower().startswith("https://"):
+            texto = texto[len("https://"):]
+        return _nombre_dns(texto.rstrip("/"), "panel.cloudflare_access.equipo")
+
+    @field_validator("aud", mode="before")
+    @classmethod
+    def _aud(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("panel.cloudflare_access.aud tiene que ser un texto")
+        return v.strip() or None
+
+    @field_validator("emails", mode="before")
+    @classmethod
+    def _emails(cls, v: Any) -> Any:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
+            raise ValueError("panel.cloudflare_access.emails tiene que ser una lista de mails")
+        emails = []
+        for e in v:
+            if not isinstance(e, str) or e.strip().count("@") != 1 or any(c.isspace() for c in e.strip()):
+                raise ValueError(f"panel.cloudflare_access.emails: {e!r} no es un mail")
+            emails.append(e.strip().lower())
+        return emails
+
+    @property
+    def completa(self) -> bool:
+        return bool(self.equipo and self.aud and self.emails)
+
+    @property
+    def emisor(self) -> str:
+        return f"https://{self.equipo}"
+
+    @property
+    def url_claves(self) -> str:
+        return f"https://{self.equipo}/cdn-cgi/access/certs"
+
+
+def mail_valido(texto: str) -> bool:
+    """Un mail para Access: una sola @, algo de cada lado y sin espacios."""
+    usuario, arroba, dominio = texto.partition("@")
+    return bool(arroba and usuario and dominio and "@" not in dominio and not any(c.isspace() for c in texto))
+
+
+class Invitado(_Modelo):
+    """Un invitado de sólo lectura (§13, §14): entra sólo por el dominio, con Access y sin la contraseña
+    del panel, y ve sólo las clases de `materias` (una lista explícita: no hay "todas")."""
+
+    email: str
+    materias: list[str]
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email(cls, v: Any) -> Any:
+        if not isinstance(v, str) or not mail_valido(v.strip()):
+            raise ValueError(f"panel.invitados: {v!r} no es un mail")
+        if v != v.strip().lower():
+            raise ValueError(f"panel.invitados: el mail {v!r} va en minúscula y sin espacios")
+        return v
+
+    @field_validator("materias", mode="before")
+    @classmethod
+    def _materias(cls, v: Any) -> Any:
+        if not isinstance(v, list) or not all(isinstance(m, str) for m in v):
+            raise ValueError("panel.invitados: las materias de un invitado van en una lista de ids, "
+                             "como [macro, historia]")
+        repetidas = sorted({m for m in v if v.count(m) > 1})
+        if repetidas:
+            raise ValueError(f"panel.invitados: materia repetida: {', '.join(repetidas)}")
+        return v
+
+
+class Panel(_Modelo):
+    """El panel por internet (§13, §14): el único dominio público que se acepta y Cloudflare Access.
+    Sin `dominio_publico` o sin `cloudflare_access` completo, por el dominio da 403. `invitados`: los
+    de sólo lectura (los dueños son `cloudflare_access.emails`)."""
+
+    dominio_publico: str | None = None
+    cloudflare_access: CloudflareAccess = Field(default_factory=CloudflareAccess)
+    invitados: list[Invitado] = Field(default_factory=list)
+
+    @field_validator("invitados", mode="before")
+    @classmethod
+    def _invitados_vacio(cls, v: Any) -> Any:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("panel.invitados tiene que ser una lista (- email: …, materias: […])")
+        return v
+
+    @model_validator(mode="after")
+    def _invitados_validos(self) -> Panel:
+        vistos: set[str] = set()
+        for inv in self.invitados:
+            if inv.email in vistos:
+                raise ValueError(f"panel.invitados: el mail {inv.email!r} está repetido")
+            if inv.email in self.cloudflare_access.emails:
+                raise ValueError(f"panel.invitados: {inv.email!r} es un dueño (está en "
+                                 "panel.cloudflare_access.emails): un mail no puede ser dueño e invitado")
+            vistos.add(inv.email)
+        return self
+
+    def invitado(self, email: str) -> Invitado | None:
+        email = email.strip().lower()
+        return next((i for i in self.invitados if i.email == email), None)
+
+    @field_validator("dominio_publico", mode="before")
+    @classmethod
+    def _dominio(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if not isinstance(v, str):
+            raise ValueError("panel.dominio_publico tiene que ser un texto")
+        return _nombre_dns(v, "panel.dominio_publico")
+
+    @field_validator("cloudflare_access", mode="before")
+    @classmethod
+    def _access(cls, v: Any) -> Any:
+        return {} if v is None else v
+
+    @property
+    def por_el_dominio(self) -> bool:
+        """El dominio está configurado con los tres candados (si no, por el dominio da 403)."""
+        return self.dominio_publico is not None and self.cloudflare_access.completa
+
+
 class Transcribir(_Modelo):
     motor: str = "gemini"
     modelo: str = "gemini-3.5-transcribe"
@@ -268,6 +428,34 @@ class RevisarTranscript(_Modelo):
         return v
 
 
+TOPE_WEB_MAX = 50  # más que esto por corrida no tiene sentido para un apunte (el CLI corta en 200)
+
+
+class ApunteWeb(_Modelo):
+    """Búsqueda en internet del agente del apunte (§7, §14): WebSearch y WebFetch, a criterio del agente.
+    Global (no por materia). Los topes son por corrida del agente; WebFetch sólo abre URLs que salieron
+    en una búsqueda de la misma corrida (la política está en ia.agente_apunte)."""
+
+    activa: bool = True
+    max_busquedas: int = 12   # llamadas a WebSearch (cada una puede hacer hasta 8 consultas al buscador)
+    max_paginas: int = 8      # llamadas a WebFetch
+
+    @field_validator("activa", mode="before")
+    @classmethod
+    def _activa(cls, v: Any) -> Any:
+        if not isinstance(v, bool):
+            raise ValueError("apunte.web.activa tiene que ser true o false")
+        return v
+
+    @field_validator("max_busquedas", "max_paginas", mode="before")
+    @classmethod
+    def _tope(cls, v: Any, info: Any) -> int:
+        if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= TOPE_WEB_MAX:
+            raise ValueError(f"apunte.web.{info.field_name} tiene que ser un entero entre 1 y {TOPE_WEB_MAX} "
+                             "(para apagar la búsqueda: apunte.web.activa: false)")
+        return v
+
+
 class Apunte(_Modelo):
     motor: str = "claude-agent"
     modelo: str | None = "claude-opus-5-5"
@@ -276,6 +464,12 @@ class Apunte(_Modelo):
     max_intentos_compilacion: int = 5
     tope_correccion_min: float = 10
     timeout_min: float = 45
+    web: ApunteWeb = Field(default_factory=ApunteWeb)
+
+    @field_validator("web", mode="before")
+    @classmethod
+    def _web(cls, v: Any) -> Any:
+        return {} if v is None else v  # `web:` vacío en el YAML: los valores por defecto
 
     @field_validator("motor_latex")
     @classmethod
@@ -332,6 +526,7 @@ class Config(_Modelo):
     home: Path
     datos: Path
     servidor: Servidor = Field(default_factory=Servidor)
+    panel: Panel = Field(default_factory=Panel)
     zona_horaria: str = "America/Argentina/Buenos_Aires"
     transcribir: Transcribir = Field(default_factory=Transcribir)
     clasificar: Clasificar = Field(default_factory=Clasificar)
@@ -350,6 +545,11 @@ class Config(_Modelo):
     # os.environ: el agente la recibe en el entorno de su corrida sólo cuando factura por API.
     anthropic_api_key: str | None = Field(default=None, repr=False)
 
+    @field_validator("panel", mode="before")
+    @classmethod
+    def _panel_vacio(cls, v: Any) -> Any:
+        return {} if v is None else v  # `panel:` sin nada abajo
+
     @field_validator("materias")
     @classmethod
     def _ids_unicos(cls, v: list[Materia]) -> list[Materia]:
@@ -359,6 +559,16 @@ class Config(_Modelo):
                 raise ValueError(f"materia repetida: {m.id}")
             vistos.add(m.id)
         return v
+
+    @model_validator(mode="after")
+    def _materias_de_invitados(self) -> Config:
+        ids = {m.id for m in self.materias}
+        for inv in self.panel.invitados:
+            faltan = [m for m in inv.materias if m not in ids]
+            if faltan:
+                raise ValueError(f"panel.invitados: {inv.email}: no hay materia con id "
+                                 f"{', '.join(map(repr, faltan))} en materias")
+        return self
 
     # --- rutas de datos ---
     @property

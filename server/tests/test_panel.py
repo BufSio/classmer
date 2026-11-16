@@ -1,4 +1,4 @@
-"""Panel web (§13): sólo desde la PC, cada pantalla, ediciones sin reiniciar y acciones."""
+"""Panel web (§13): desde la PC, cada pantalla, ediciones sin reiniciar y acciones (desde la red: test_panel_acceso)."""
 
 from __future__ import annotations
 
@@ -71,11 +71,12 @@ def armar_clase(app, sid: str = SID, *, materia_id: str | None = "prueba", estad
     return carpeta
 
 
-# --- sólo desde la PC ----------------------------------------------------------------------------
+# --- quién entra (la PC sin nada; la red, sin contraseña puesta, 403) -----------------------------
 
 def test_desde_la_lan_403(client: TestClient):
+    """Sin contraseña puesta en /panel/acceso, la red sigue sin entrar (con la contraseña: test_panel_acceso)."""
     lan = TestClient(client.app, base_url="http://192.168.1.10:8000", client=("192.168.1.20", 40000))
-    for ruta in ("/panel", "/panel/clases", "/panel/materias", "/panel/estado", "/"):
+    for ruta in ("/panel", "/panel/clases", "/panel/materias", "/panel/estado", "/", "/panel/acceso"):
         r = lan.get(ruta)
         assert r.status_code == 403, ruta
     assert lan.post("/panel/estilo", data={"estilo_global": "x"}).status_code == 403
@@ -445,6 +446,26 @@ def test_guardar_modelos_sin_reiniciar(home: Path, client: TestClient, panel: Te
     # Esfuerzo vacío = el default del modelo (null en el yaml).
     panel.post("/panel/modelos", data={"apunte": "claude-sonnet-5-5", "apunte_esfuerzo": ""})
     assert config_guardada(home)["apunte"]["esfuerzo"] is None and cfg.apunte.esfuerzo is None
+
+
+def test_casillero_de_la_busqueda_web(home: Path, client: TestClient, panel: TestClient):
+    cfg = client.app.state.cfg
+    html = panel.get("/panel/modelos").text
+    assert "El agente puede buscar en internet" in html
+    assert re.search(r'<input type="checkbox" id="apunte_web" name="apunte_web" checked>', html)
+    assert "hasta 12 búsquedas y 8 páginas por apunte" in html
+    # Sin marcar, el casillero no viaja: el campo oculto dice que el formulario lo traía.
+    r = panel.post("/panel/modelos", data={"apunte": "claude-opus-5-5", "apunte_esfuerzo": "high",
+                                           "apunte_web_form": "1"})
+    assert mensaje(r)[1] == "ok" and cfg.apunte.web.activa is False
+    assert config_guardada(home)["apunte"] == {"web": {"activa": False}}
+    assert 'name="apunte_web">' in panel.get("/panel/modelos").text  # ya no sale marcado
+    r = panel.post("/panel/modelos", data={"apunte": "claude-opus-5-5", "apunte_esfuerzo": "high",
+                                           "apunte_web_form": "1", "apunte_web": "on"})
+    assert cfg.apunte.web.activa is True and config_guardada(home)["apunte"] == {"web": {"activa": True}}
+    # Un formulario que no trae el campo oculto (la facturación) no toca la web.
+    panel.post("/panel/modelos", data={"facturacion": "max"})
+    assert cfg.apunte.web.activa is True
 
 
 @pytest.mark.parametrize("datos, error", [
@@ -978,7 +999,9 @@ def test_el_pdf_y_el_tex_vigentes_se_revalidan_siempre(client: TestClient, panel
                  f"/panel/clases/{SID}/apunte/v1.pdf", f"/panel/clases/{SID}/apunte/v1.tex"):
         r = panel.get(ruta)
         assert r.status_code == 200 and r.headers["cache-control"] == "no-cache", ruta
-    assert panel.get(f"/panel/clases/{SID}/apunte.pdf").headers["content-disposition"] == 'inline; filename="apunte.pdf"'
+    # Inline, con un nombre legible por si lo guardan desde el visor (descargar: test_panel_invitados).
+    assert panel.get(f"/panel/clases/{SID}/apunte.pdf").headers["content-disposition"] == (
+        "inline; filename*=utf-8''Materia%20de%20Prueba%202026-10-15%20-%20apunte.pdf")
     # También por rangos, como lo pide el visor de PDF del navegador.
     r = panel.get(url, headers={"Range": "bytes=0-3"})
     assert r.status_code == 206 and r.content == b"%PDF" and r.headers["cache-control"] == "no-cache"
@@ -1074,7 +1097,7 @@ def test_clase_lista_los_adjuntos(client: TestClient, panel: TestClient):
 def test_clase_sin_adjuntos_muestra_solo_el_formulario(client: TestClient, panel: TestClient):
     armar_clase(client.app)
     html = panel.get(f"/panel/clases/{SID}").text
-    assert "<h2>Adjuntos</h2>" in html and 'class="adjuntos"' not in html and "Descargar" not in html
+    assert "<h2>Adjuntos</h2>" in html and 'class="adjuntos"' not in html and f"/panel/clases/{SID}/adjuntos/" not in html
     assert f'action="/panel/clases/{SID}/adjuntos"' in html and "PDF, JPEG, PNG, WebP o HEIC, hasta 100 MB" in html
     assert "que el apunte vigente no usa" not in html
 

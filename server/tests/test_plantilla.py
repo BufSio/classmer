@@ -189,6 +189,34 @@ def test_lecturas_externas_con_porcentajes():
         assert latex.lecturas_externas(texto) == [], texto
 
 
+# Links como los que trae la búsqueda en internet del agente: %, #, _, & y ~ en el texto, en una caja y
+# (escapados) dentro del argumento de otro comando.
+LINKS_WEB = (
+    "Según \\href{https://www.indec.gob.ar/uploads/informesdeprensa/ipc_11_26.pdf#page=3}{el INDEC} y\n"
+    "\\url{https://www.ambito.com/economia/nota_con-guion?id=12&utm=x%20y#comentarios}.\n\n"
+    "\\begin{agregadoIA}[Lo que dice la web]\n"
+    "Fuente: \\url{https://es.wikipedia.org/wiki/Inflaci%C3%B3n_en_Argentina#Historia} y\n"
+    "\\href{https://example.org/~usuario/a_b.html?x=1&y=2%2C3}{otra nota} (10/11/2026).\n"
+    "\\end{agregadoIA}\n\n"
+    "Al pie\\footnote{Ver \\href{https://example.org/a\\%20b\\#c}{la nota} o \\url{https://example.org/~x_y}.}\n"
+    "\\section{Con link en el título \\texorpdfstring{\\href{https://example.org/a\\%20b}{(fuente)}}{}}\n"
+)
+
+
+def test_links_de_la_web_no_son_lecturas_de_afuera(tmp_path: Path):
+    assert latex.lecturas_externas(LINKS_WEB) == []
+    escribir(tmp_path, PREAMBULO + "\\begin{document}\n" + LINKS_WEB + "\\end{document}\n")
+    assert latex.lecturas_externas_en(tmp_path) == []
+
+
+@con_latex()
+def test_links_de_la_web_compilan(carpeta: Path):
+    escribir(carpeta, PREAMBULO + "\\begin{document}\n" + LINKS_WEB + "\\end{document}\n")
+    r = latex.compilar(carpeta)
+    assert r.ok, r.log
+    assert r.errores == []
+
+
 def test_lecturas_externas_en_la_carpeta(tmp_path: Path):
     latex.copiar_plantilla(tmp_path)  # classmer.cls usa \graphicspath con '..': es del server, no cuenta
     escribir(tmp_path, "\\documentclass{classmer}\\begin{document}\\input{parte2}\\end{document}\n")

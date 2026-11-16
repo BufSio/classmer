@@ -17,7 +17,21 @@ Política de herramientas (hook PreToolUse que decide TODO, ver `decidir`):
 - Bash: sólo compilar `apunte.tex` con pdflatex/lualatex en output/, con tope de intentos y tiempo,
   y sólo si lo que hay en output/ no lee archivos de afuera (\\openin, \\input{C:/…}, …: ver
   latex.lecturas_externas; el rechazo no gasta intento).
+- WebSearch y WebFetch, sólo con la búsqueda en internet activa (`TrabajoApunte.web`, de apunte.web):
+  hasta un tope de cada una por corrida, y WebFetch sólo para URLs que salieron en los resultados de una
+  búsqueda de la misma corrida, https:443 hacia un nombre público que no sea el dominio del panel (nunca
+  una IP, localhost ni la LAN: el CLI baja la página desde esta PC, donde el panel responde en
+  127.0.0.1:8000 sin contraseña). Las URLs se juntan sólo del `tool_response` estructurado del hook
+  PostToolUse (los resultados del buscador), nunca del texto del ToolResultBlock: ese texto repite la
+  consulta del agente y el resumen del modelo que busca, y una línea "Links: […]" ahí la puede escribir
+  cualquiera. Apagada, las dos quedan en PROHIBIDAS como siempre (la clasificación y la revisión del
+  transcript usan PROHIBIDAS tal cual: nunca tienen web).
 - Cualquier otra cosa: denegada.
+El hook decide en un hilo (el chequeo de DNS de WebFetch bloquea) y de a una decisión por vez.
+
+Costo: el total_cost_usd del CLI ya incluye las búsquedas (las hace una consulta aparte, con su usage);
+la cantidad real llega en model_usage[*].webSearchRequests. Si no llega, el costo es igual el del CLI y
+el resumen dice que no se sabe cuántas consultas fueron.
 
 El SDK necesita un loop asyncio propio: en Windows, Proactor (subprocess).
 """
@@ -26,13 +40,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import os
 import re
 import shlex
+import socket
 import sys
 import threading
 import time
+import urllib.parse
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -47,6 +64,9 @@ if TYPE_CHECKING:
     from classmer.config import Config
 
 HERRAMIENTAS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+# Búsqueda en internet (apunte.web): sólo en el agente del apunte y con la web activa. La clasificación y
+# la revisión del transcript usan PROHIBIDAS tal cual, con estas dos adentro.
+HERRAMIENTAS_WEB = ["WebSearch", "WebFetch"]
 # Todo lo demás que trae Claude Code: se saca del contexto del modelo (y el hook lo deniega igual).
 PROHIBIDAS = [
     "WebFetch", "WebSearch", "Task", "Agent", "NotebookEdit", "NotebookRead", "TodoWrite", "MultiEdit",
@@ -69,14 +89,17 @@ ESPERA_LOGIN_S = 1800
 LARGO_PROMPT_ARGV = 24_000  # Windows corta la línea de comando en ~32k caracteres
 NOMBRE_LOG = "agente.log"
 MAX_BUFFER_SDK = 1024 ** 3  # tope por mensaje del CLI (una foto leída va en base64 adentro)
+MAX_CONSULTA_WEB = 300      # caracteres de una consulta a WebSearch: se busca el tema, no pedazos del transcript
+COSTO_BUSQUEDA_USD = 0.01   # tarifa de la API por consulta al buscador (USD 10 cada 1.000)
 
 # Variables del entorno del proceso que no se le pasan al CLI: claves de API (con el plan Max
 # facturaría por API; con la API, la clave es la del .env y va en las opciones de la corrida), la URL
 # de la API (una sesión de Claude Code exporta ANTHROPIC_BASE_URL a su proxy local: la clave del .env
 # iría ahí y no a api.anthropic.com) y las que deja una sesión de Claude Code que lanzó el server (el
-# agente no es una sesión hija).
+# agente no es una sesión hija). También NODE_TLS_REJECT_UNAUTHORIZED: WebFetch tiene que validar el
+# certificado, que es lo que de verdad frena un DNS rebinding hacia la PC o la LAN (ver _revisar_dns).
 VARIABLES_FUERA = (
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "NODE_TLS_REJECT_UNAUTHORIZED",
     "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "CLAUDE_CODE_SESSION_ATTENDED",
@@ -98,6 +121,40 @@ _entorno_lock = threading.Lock()
 
 # --- contrato con la etapa -----------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class WebCorrida:
+    """La búsqueda en internet de una corrida (apunte.web con `activa: true`). None en TrabajoApunte: apagada."""
+
+    max_busquedas: int = 12
+    max_paginas: int = 8
+    dominio_propio: str | None = None   # panel.dominio_publico: el panel no se abre desde el agente
+
+    @classmethod
+    def desde_config(cls, cfg: Config) -> WebCorrida | None:
+        web = cfg.apunte.web
+        if not web.activa:
+            return None
+        return cls(max_busquedas=web.max_busquedas, max_paginas=web.max_paginas,
+                   dominio_propio=cfg.panel.dominio_publico)
+
+
+def herramientas(web: WebCorrida | None) -> list[str]:
+    """Las herramientas que ve el modelo en esta corrida."""
+    return list(HERRAMIENTAS) + (list(HERRAMIENTAS_WEB) if web else [])
+
+
+def prohibidas(web: WebCorrida | None) -> list[str]:
+    """`disallowed_tools` de esta corrida: un allow del hook no le gana a una regla deny, así que con la web
+    activa WebSearch y WebFetch tienen que salir de acá."""
+    return [p for p in PROHIBIDAS if not (web and p in HERRAMIENTAS_WEB)]
+
+
+def max_turnos(web: WebCorrida | None) -> int:
+    """Turnos por ronda. Un apunte largo ya usa ~80; con la web, en el peor caso cada búsqueda y cada página
+    son un turno más (el modelo suele mandarlas en paralelo, pero el tope no puede cortar el apunte)."""
+    return MAX_TURNOS + (web.max_busquedas + web.max_paginas if web else 0)
+
+
 @dataclass
 class TrabajoApunte:
     workdir: Path                       # carpeta de trabajo (ASCII, sin espacios): input/ plantilla/ output/
@@ -113,6 +170,7 @@ class TrabajoApunte:
     duracion_ms: int | None
     esfuerzo: str | None = None         # low … max (`--effort` del CLI); None: el default del modelo
     facturacion: str = MAX              # api | max: con qué se paga esta corrida
+    web: WebCorrida | None = None       # búsqueda en internet; None: apagada (como antes de apunte.web)
 
 
 @dataclass
@@ -142,6 +200,12 @@ class EstadoPolitica:
     # Donde Claude Code guarda las salidas largas de las herramientas de esta sesión
     # (~/.claude/projects/<proyecto>/<sesión>/tool-results/): el agente las tiene que poder leer.
     resultados: Path | None = None
+    # Búsqueda en internet (None: apagada). Cuenta lo permitido y junta las URLs de los resultados.
+    web: WebCorrida | None = None
+    busquedas: int = 0
+    paginas: int = 0
+    urls_web: set[str] = field(default_factory=set)       # normalizadas (ver clave_url)
+    resolver: Callable[[str], list[str]] = field(default=lambda host: resolver_host(host))
 
     def __post_init__(self) -> None:
         self.workdir = Path(self.workdir).resolve()
@@ -187,6 +251,20 @@ class EstadoPolitica:
         except OSError:
             return False
 
+    def anotar_busqueda(self, resultado: Any) -> int:
+        """Junta las URLs de un resultado de WebSearch (las que WebFetch puede abrir después): el
+        `tool_response` del hook PostToolUse. Devuelve cuántas nuevas sumó (ver urls_de_resultado)."""
+        return self.anotar_urls(urls_de_resultado(resultado))
+
+    def anotar_urls(self, urls: list[str]) -> int:
+        """Suma URLs de los resultados del buscador (normalizadas). Devuelve cuántas nuevas sumó."""
+        antes = len(self.urls_web)
+        for url in urls:
+            clave = clave_url(url)
+            if clave is not None:
+                self.urls_web.add(clave)
+        return len(self.urls_web) - antes
+
 
 COMANDO_EJEMPLO = (f"cd {CARPETA_SALIDA} && pdflatex -interaction=nonstopmode -halt-on-error -file-line-error "
                    f"-no-shell-escape {ARCHIVO_TEX}")
@@ -205,8 +283,13 @@ def decidir(tool_name: str, tool_input: dict[str, Any], estado: EstadoPolitica) 
         return _decidir_escritura(tool_name, datos, estado)
     if tool_name == "Bash":
         return _decidir_bash(datos, estado)
+    if tool_name == "WebSearch" and estado.web is not None:
+        return _decidir_busqueda(datos, estado, estado.web)
+    if tool_name == "WebFetch" and estado.web is not None:
+        return _decidir_pagina(datos, estado, estado.web)
     return False, (f"La herramienta {tool_name or '(sin nombre)'} no está habilitada: sólo Read, Glob, Grep, "
-                   f"Write/Edit en {CARPETA_SALIDA}/ y Bash para compilar.")
+                   f"Write/Edit en {CARPETA_SALIDA}/ y Bash para compilar"
+                   + (", y WebSearch y WebFetch para buscar en internet." if estado.web is not None else "."))
 
 
 def _decidir_lectura(nombre: str, datos: dict[str, Any], estado: EstadoPolitica) -> tuple[bool, str]:
@@ -342,6 +425,209 @@ def validar_comando(comando: str, estado: EstadoPolitica) -> tuple[bool, str]:
     return True, ""
 
 
+# --- búsqueda en internet (WebSearch / WebFetch) -------------------------------------------------
+#
+# WebFetch lo ejecuta el CLI en la PC del server, donde el panel responde en 127.0.0.1:8000 como dueño y
+# sin contraseña; el CLI sólo rechaza `localhost` y los nombres sin punto (127.0.0.1 o una IP de la LAN
+# los intenta). Por eso abre sólo URLs que salieron en una búsqueda de esta corrida y, además, nunca
+# algo que no sea https:443 hacia un nombre público.
+
+_SIGUE = "No corta el apunte ni gasta intentos de compilación: seguí con lo que ya tenés."
+# El host, tal como lo deja el parser de URLs del CLI (WHATWG): ASCII, minúsculas, sin % ni nada raro.
+# Un host con otros caracteres (`１２７．０．０．１`, `%31…`, `\`) el CLI lo normaliza distinto: se deniega.
+_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
+# Para el parser WHATWG, un host cuyo último tramo es numérico (`2130706433`, `0x7f.1`, `127.1`) es una IPv4.
+_TRAMO_NUMERICO_RE = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)")
+_CARACTERES_URL_RAROS = re.compile(r"[\x00-\x20\x7f\\]")
+# Una consulta es una línea: el CLI la repite en el texto del resultado y un salto de línea ahí podría
+# imitar el formato de los resultados.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+
+
+def _decidir_busqueda(datos: dict[str, Any], estado: EstadoPolitica, web: WebCorrida) -> tuple[bool, str]:
+    consulta = datos.get("query")
+    if not isinstance(consulta, str) or not consulta.strip():
+        return False, "WebSearch: falta la consulta (`query`)"
+    if _CONTROL_RE.search(consulta):
+        return False, ("WebSearch: la consulta no puede tener saltos de línea, tabulaciones ni caracteres de "
+                       "control: buscá el tema en una sola línea")
+    if len(consulta) > MAX_CONSULTA_WEB:
+        return False, (f"WebSearch: la consulta tiene {len(consulta)} caracteres (máximo {MAX_CONSULTA_WEB}). Buscá el "
+                       "tema con pocas palabras, sin pegar pedazos del transcript")
+    if estado.busquedas >= web.max_busquedas:
+        return False, f"WebSearch: se alcanzó el tope de {web.max_busquedas} búsquedas de esta corrida. {_SIGUE}"
+    estado.busquedas += 1
+    return True, f"búsqueda {estado.busquedas} de {web.max_busquedas}"
+
+
+def _decidir_pagina(datos: dict[str, Any], estado: EstadoPolitica, web: WebCorrida) -> tuple[bool, str]:
+    url = datos.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return False, "WebFetch: falta la URL (`url`)"
+    # En este orden: lo que no sale a la red, si salió en una búsqueda y el tope; recién después el DNS
+    # (un nombre que armó el agente no llega ni a una consulta DNS, que también saca datos de la PC).
+    ok, motivo, host = _revisar_url_sin_red(url, estado)
+    if not ok:
+        return False, f"WebFetch: {motivo}"
+    if clave_url(url) not in estado.urls_web:
+        return False, ("WebFetch: sólo abre páginas que salieron en los resultados de una búsqueda de esta corrida, "
+                       "con la URL tal como vino. Si necesitás otra página (o el destino de una redirección), "
+                       "buscala con WebSearch")
+    if estado.paginas >= web.max_paginas:
+        return False, f"WebFetch: se alcanzó el tope de {web.max_paginas} páginas de esta corrida. {_SIGUE}"
+    ok, motivo = _revisar_dns(host, estado)
+    if not ok:
+        return False, f"WebFetch: {motivo}"
+    estado.paginas += 1
+    return True, f"página {estado.paginas} de {web.max_paginas}"
+
+
+def revisar_url(url: str, estado: EstadoPolitica) -> tuple[bool, str]:
+    """Cinturón de WebFetch (aunque la URL haya salido de una búsqueda): https, puerto 443, sin usuario ni
+    contraseña, un nombre (no una IP, ni localhost) que no sea el dominio propio y que resuelva sólo a IPs
+    públicas. (permitir, motivo)."""
+    ok, motivo, host = _revisar_url_sin_red(url, estado)
+    return _revisar_dns(host, estado) if ok else (False, motivo)
+
+
+def _revisar_url_sin_red(url: str, estado: EstadoPolitica) -> tuple[bool, str, str]:
+    """La parte del cinturón que no sale a la red. (permitir, motivo, host)."""
+    if _CARACTERES_URL_RAROS.search(url):
+        return False, "la URL tiene espacios, caracteres de control o barras invertidas", ""
+    try:
+        partes = urllib.parse.urlsplit(url.strip())
+        puerto = partes.port
+    except ValueError:
+        return False, "URL inválida", ""
+    esquema = partes.scheme.lower()
+    if esquema == "http":
+        # Sólo se sugiere https si con https pasaría (a `http://127.0.0.1:8000/panel` no se le sugiere nada).
+        ok, motivo, host = _revisar_url_sin_red("https" + url.strip()[4:], estado)
+        return False, ("sólo se abren páginas https: pedila con https://" if ok else motivo), ""
+    if esquema != "https":
+        return False, "sólo se abren páginas https", ""
+    if "@" in partes.netloc or partes.username is not None or partes.password is not None:
+        return False, "la URL no puede llevar usuario ni contraseña", ""
+    host = (partes.hostname or "").rstrip(".")
+    if not host:
+        return False, "la URL no tiene host", ""
+    if ":" in host or _es_ip(host) or _TRAMO_NUMERICO_RE.fullmatch(host.rsplit(".", 1)[-1]):
+        return False, "no se abren direcciones IP, sólo nombres de sitios públicos", ""
+    if puerto not in (None, 443):
+        return False, f"sólo el puerto 443 (la URL pide el {puerto})", ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return False, "no se abre localhost", ""
+    if not host.isascii():
+        # Al CLI sólo le llegan nombres ASCII: así el host que se chequea acá es el mismo al que se conecta
+        # (su parser pasaría el nombre a punycode por su cuenta, y no siempre igual que Python).
+        puny = _host_punycode(host)
+        if puny is not None:
+            sugerida = urllib.parse.urlunsplit(("https", puny + (f":{puerto}" if puerto else ""), partes.path,
+                                                partes.query, partes.fragment))
+            if _revisar_url_sin_red(sugerida, estado)[0]:
+                return False, f"el nombre {host!r} no es ASCII: pedila con el nombre en punycode, {sugerida}", ""
+        return False, f"el nombre {host!r} no es un dominio público ASCII", ""
+    if not _HOST_RE.fullmatch(host):
+        return False, f"el nombre {host!r} no es un dominio público ASCII", ""
+    propio = (estado.web.dominio_propio if estado.web else None) or ""
+    propio = propio.lower().rstrip(".")
+    if propio and (host == propio or host.endswith("." + propio)):
+        return False, f"{host} es el dominio de Classmer: no se abre desde el agente", ""
+    return True, "", host
+
+
+def _revisar_dns(host: str, estado: EstadoPolitica) -> tuple[bool, str]:
+    """Que `host` resuelva sólo a IPs públicas (ni la PC, ni la LAN, ni la VPN, ni link-local).
+
+    Mitiga, no tapa: el CLI vuelve a resolver el nombre al bajar la página (un DNS con TTL corto puede
+    cambiar en el medio) y sigue solo los redirects al mismo host o a su variante con o sin `www.`, que
+    no pasan por acá. Lo que de verdad frena un rebinding hacia la PC o la LAN es que sólo se abre https
+    al 443 validando el certificado: ahí no hay quien muestre uno válido para un nombre ajeno (el panel,
+    además, es http en el 8000)."""
+    try:
+        ips = estado.resolver(host)
+    except OSError as e:
+        return False, f"no pude resolver {host} ({e.__class__.__name__})"
+    if not ips:
+        return False, f"no pude resolver {host}"
+    for texto in ips:
+        try:
+            ip = ipaddress.ip_address(texto.split("%", 1)[0])
+        except ValueError:
+            return False, f"{host} resuelve a algo que no es una IP ({texto!r})"
+        mapeada = getattr(ip, "ipv4_mapped", None)
+        if not ip.is_global or (mapeada is not None and not mapeada.is_global):
+            return False, f"{host} resuelve a una dirección privada, local o reservada ({ip})"
+    return True, ""
+
+
+def _es_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def resolver_host(host: str) -> list[str]:
+    """Las IPs a las que resuelve `host` (como las buscaría el CLI). OSError si no resuelve."""
+    return sorted({str(info[4][0]) for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+
+
+def _host_punycode(host: str) -> str | None:
+    """Un nombre con caracteres no ASCII (`münchen.de`) en punycode (`xn--mnchen-3ya.de`); None si no se puede."""
+    try:
+        puny = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    return puny.lower() if puny.isascii() else None
+
+
+def clave_url(url: Any) -> str | None:
+    """La URL normalizada para comparar la que pide WebFetch con las de los resultados: esquema y host en
+    minúscula, el host en punycode si no es ASCII (WebFetch sólo lo acepta así), http como https (el CLI lo
+    pasa solo), sin el puerto 443, sin el fragmento (#…) y con camino '/' si no tiene. El resto (camino y
+    consulta) se compara tal cual. None si no es una URL."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        p = urllib.parse.urlsplit(url.strip())
+        puerto = p.port
+    except ValueError:
+        return None
+    if p.scheme.lower() not in ("http", "https") or not p.hostname:
+        return None
+    host = p.hostname.rstrip(".")
+    if not host.isascii():
+        host = _host_punycode(host) or ""
+        if not host:
+            return None
+    if ":" in host:
+        host = f"[{host}]"
+    if puerto not in (None, 443, 80):
+        host = f"{host}:{puerto}"
+    usuario = ""
+    if "@" in p.netloc:
+        usuario = p.netloc.rsplit("@", 1)[0] + "@"  # se conserva para que no coincida con la URL sin usuario
+    return urllib.parse.urlunsplit(("https", usuario + host, p.path or "/", p.query, ""))
+
+
+def urls_de_resultado(resultado: Any) -> list[str]:
+    """Las URLs de los resultados del buscador en el `tool_response` de WebSearch que recibe el hook
+    PostToolUse: {"query", "results": [{"tool_use_id", "content": [{"title", "url"}]} | texto]}. Sólo las de
+    `content`: el texto suelto lo redacta el modelo que hace la búsqueda y no cuenta. Un texto (el del
+    ToolResultBlock, que repite la consulta del agente y ese resumen) no da ninguna."""
+    if isinstance(resultado, dict):
+        resultado = resultado.get("results")
+    if not isinstance(resultado, list):
+        return []
+    urls: list[str] = []
+    for r in resultado:
+        if isinstance(r, dict) and isinstance(r.get("content"), list):
+            urls += [c["url"] for c in r["content"] if isinstance(c, dict) and isinstance(c.get("url"), str)]
+    return urls
+
+
 def resolver_ruta(ruta: Any, base: Path) -> Path | None:
     """Ruta (absoluta, relativa a `base`, con / o \\, estilo Git Bash /c/...) → Path absoluta resuelta.
     None si es inválida o rara (UNC, \\\\?\\, flujos alternativos 'archivo:flujo', bytes nulos)."""
@@ -398,6 +684,8 @@ class Registro:
         self.denegadas: list[str] = []
         self.compilaciones: list[dict[str, Any]] = []
         self._bash: dict[str, dict[str, Any]] = {}
+        self._busquedas: dict[str, str] = {}  # tool_use_id → consulta, de los WebSearch permitidos
+        self._resultados_busqueda: dict[str, int] = {}  # tool_use_id → URLs que trajo (hook PostToolUse)
         self.stderr: deque[str] = deque(maxlen=40)
         self.secretos: list[str] = []  # valores que nunca se escriben (la API key de la corrida)
 
@@ -424,7 +712,9 @@ class Registro:
         self.usos[nombre] += 1
         resumen = resumen_entrada(nombre, datos)
         if permitir:
-            self(f"{nombre} {resumen}" + (f" ({motivo})" if nombre == "Bash" else ""))
+            self(f"{nombre} {resumen}" + (f" ({motivo})" if nombre in ("Bash", *HERRAMIENTAS_WEB) else ""))
+            if nombre == "WebSearch" and tool_use_id:
+                self._busquedas[tool_use_id] = str(datos.get("query", ""))
             if nombre == "Bash" and tool_use_id:
                 comp = {"n": len(self.compilaciones) + 1, "comando": resumen, "resultado": "sin resultado",
                         "desde": time.time()}
@@ -434,9 +724,21 @@ class Registro:
             self.denegadas.append(f"{nombre} {resumen}: {motivo}")
             self(f"DENEGADO {nombre} {resumen}: {motivo}")
 
+    def resultados_busqueda(self, tool_use_id: str | None, cuantos: int) -> None:
+        """Lo que trajo un WebSearch según el hook PostToolUse (se escribe al llegar su resultado)."""
+        if tool_use_id:
+            self._resultados_busqueda[tool_use_id] = cuantos
+
     def resultado_herramienta(self, tool_use_id: str, contenido: Any, es_error: bool | None) -> None:
         comp = self._bash.pop(tool_use_id, None)
         texto = _texto_de(contenido)
+        consulta = self._busquedas.pop(tool_use_id, None)
+        cuantos = self._resultados_busqueda.pop(tool_use_id, None)
+        if consulta is not None and not es_error:
+            # Las URLs que WebFetch puede abrir llegan sólo por el hook PostToolUse (nunca de este texto).
+            self(f"  → WebSearch {consulta[:120]!r}: "
+                 + (_cuantas(cuantos, "resultado", "resultados") if cuantos is not None
+                    else "el hook no recibió los resultados (WebFetch no va a poder abrir esas páginas)"))
         if comp is None:
             if es_error:
                 self(f"  → error de la herramienta: {' '.join(texto.split())[:300]}")
@@ -448,7 +750,8 @@ class Registro:
 
     def resumen(self, *, modelo: str | None, turnos: int, costo: float | None, seguimientos: int,
                 errores_salida: list[str], error: str | None, estado: EstadoPolitica,
-                esfuerzo: str | None = None, facturacion: str = MAX, avisos: list[str] | None = None) -> str:
+                esfuerzo: str | None = None, facturacion: str = MAX, avisos: list[str] | None = None,
+                consultas_web: int | None = None) -> str:
         dur = int(time.monotonic() - self.t0)
         costo_txt = texto_costo(costo, facturacion) if costo is not None else "—"
         lineas = [
@@ -457,6 +760,7 @@ class Registro:
             f"costo {costo_txt}",
             "Herramientas: " + (", ".join(f"{k} ×{v}" for k, v in sorted(self.usos.items())) or "ninguna")
             + (f" (denegadas: {len(self.denegadas)})" if self.denegadas else ""),
+            self.linea_web(estado, consultas_web),
             f"Compilaciones del agente: {estado.intentos} de {estado.max_intentos}"
             + ("".join(f"\n  {c['n']}. {c['resultado']}" for c in self.compilaciones)),
         ]
@@ -473,10 +777,51 @@ class Registro:
                 lineas.append("stderr del CLI (últimas líneas):" + "".join(f"\n  {s}" for s in list(self.stderr)[-15:]))
         return self.ocultar("\n".join(lineas))
 
+    def linea_web(self, estado: EstadoPolitica, consultas: int | None) -> str:
+        """'Web: 4 búsquedas, 2 páginas · 5 consultas al buscador (US$ 0.05, incluidas en el costo)'."""
+        web = estado.web
+        if web is None:
+            return "Web: apagada"
+        linea = (f"Web: {_cuantas(estado.busquedas, 'búsqueda', 'búsquedas')} (tope {web.max_busquedas}), "
+                 f"{_cuantas(estado.paginas, 'página', 'páginas')} (tope {web.max_paginas})")
+        denegadas = sum(1 for d in self.denegadas if d.startswith(tuple(HERRAMIENTAS_WEB)))
+        if denegadas:
+            linea += f" · {denegadas} denegada{'s' if denegadas != 1 else ''}"
+        if consultas is not None and consultas:
+            linea += (f" · {_cuantas(consultas, 'consulta', 'consultas')} al buscador "
+                      f"(US$ {consultas * COSTO_BUSQUEDA_USD:.2f}, incluido en el costo)")
+        elif consultas is None and estado.busquedas:
+            linea += " · el CLI no informó cuántas consultas hizo al buscador (su costo ya las incluye)"
+        return linea
+
+
+def _cuantas(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def consultas_web(model_usage: Any) -> int | None:
+    """Consultas reales al buscador de la sesión (`webSearchRequests` del model_usage del ResultMessage: la
+    búsqueda la hace una consulta aparte del CLI, con otro modelo, y el usage principal trae 0). None si el
+    CLI no lo informa."""
+    if not isinstance(model_usage, dict):
+        return None
+    valores = [u.get("webSearchRequests") for u in model_usage.values() if isinstance(u, dict)]
+    numeros = [int(v) for v in valores if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return sum(numeros) if numeros else None
+
 
 def resumen_entrada(nombre: str, datos: dict[str, Any]) -> str:
     if nombre == "Bash":
         return f"`{str(datos.get('command', ''))[:200]}`"
+    if nombre == "WebSearch":
+        dominios = datos.get("allowed_domains") or datos.get("blocked_domains")
+        extra = ""
+        if isinstance(dominios, list) and dominios:
+            tipo = "sólo" if datos.get("allowed_domains") else "sin"
+            extra = f" ({tipo} {', '.join(map(str, dominios))[:150]})"
+        return f"{str(datos.get('query', ''))[:MAX_CONSULTA_WEB]!r}{extra}"
+    if nombre == "WebFetch":
+        return str(datos.get("url", "?"))[:500]
     if nombre in ("Read", "Write", "Edit"):
         extra = ""
         if nombre == "Write" and isinstance(datos.get("content"), str):
@@ -706,6 +1051,7 @@ class _Corrida:
     timeout: bool = False
     errores_salida: list[str] = field(default_factory=list)
     avisos: list[str] = field(default_factory=list)
+    consultas_web: int | None = None  # consultas reales al buscador (model_usage); None: no informado
 
 
 class AgenteClaude:
@@ -743,11 +1089,13 @@ class AgenteClaude:
             registro(f"la carpeta de la materia no existe ({materia}): no se monta")
             materia = None
         estado = EstadoPolitica(workdir, materia, max_intentos=max(1, trabajo.max_intentos_compilacion),
-                                tope_s=trabajo.tope_correccion_s)
+                                tope_s=trabajo.tope_correccion_s, web=trabajo.web)
         corrida = _Corrida(medio=medio)
+        web = trabajo.web
         registro(f"inicia: modelo {trabajo.modelo or '(default)'}, esfuerzo {trabajo.esfuerzo or '(default)'}, "
                  f"facturación {medio}, cwd {estado.workdir}, materia {estado.carpeta_materia or '(no)'}, "
-                 f"tope {trabajo.timeout_s / 60:g} min")
+                 f"tope {trabajo.timeout_s / 60:g} min, web "
+                 + (f"activa (hasta {web.max_busquedas} búsquedas y {web.max_paginas} páginas)" if web else "apagada"))
         if medio == API and not clave:
             e = SinCreditos(API, "clave_invalida", "no hay ANTHROPIC_API_KEY en Classmer-data\\.env",
                             espera_s=ESPERA_CUOTA_S)
@@ -792,10 +1140,13 @@ class AgenteClaude:
         except Exception as e:  # noqa: BLE001
             corrida.errores_salida = [f"no pude validar la salida: {e}"]
         ok = error is None and not corrida.errores_salida
+        # El costo es el total_cost_usd del CLI, que ya incluye las búsquedas (USD 0.01 por consulta, del
+        # usage de la consulta que hace la búsqueda), las informe o no en model_usage.
         resumen = registro.resumen(modelo=corrida.modelo or trabajo.modelo, turnos=corrida.turnos,
                                    costo=corrida.costo, seguimientos=corrida.seguimientos,
                                    errores_salida=corrida.errores_salida, error=error, estado=estado,
-                                   esfuerzo=trabajo.esfuerzo, facturacion=medio, avisos=corrida.avisos)
+                                   esfuerzo=trabajo.esfuerzo, facturacion=medio, avisos=corrida.avisos,
+                                   consultas_web=corrida.consultas_web)
         registro("fin.\n" + resumen)
         log = resumen + "\n\n--- detalle ---\n" + "\n".join(registro.lineas)
         return ResultadoAgente(ok=ok, modelo=corrida.modelo or trabajo.modelo, costo_usd=corrida.costo,
@@ -819,13 +1170,23 @@ class AgenteClaude:
     def _opciones(self, trabajo: TrabajoApunte, estado: EstadoPolitica, registro: Registro) -> Any:
         from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
+        # El SDK corre cada hook en su propia tarea: las decisiones (que cuentan y miran lo que juntó la
+        # búsqueda) van de a una. Y en un hilo, porque el chequeo de DNS de WebFetch bloquea: así el loop
+        # sigue leyendo al CLI mientras tanto.
+        politica = asyncio.Lock()
+
+        def decidir_herramienta(nombre: str, datos: Any, transcript_path: Any) -> tuple[bool, str]:
+            estado.sesion_cli(transcript_path)
+            return decidir(nombre, datos, estado)
+
         async def pre_tool_use(entrada: Any, tool_use_id: str | None, _contexto: Any) -> dict[str, Any]:
             nombre, datos = "", {}
             try:
                 nombre = str(entrada.get("tool_name") or "")
                 datos = entrada.get("tool_input") or {}
-                estado.sesion_cli(entrada.get("transcript_path"))
-                permitir, motivo = decidir(nombre, datos, estado)
+                async with politica:
+                    permitir, motivo = await asyncio.to_thread(decidir_herramienta, nombre, datos,
+                                                               entrada.get("transcript_path"))
             except Exception as e:  # noqa: BLE001 — ante la duda, se deniega
                 permitir, motivo = False, f"error interno de la política ({e.__class__.__name__})"
             registro.herramienta(nombre, datos if isinstance(datos, dict) else {}, permitir, motivo, tool_use_id)
@@ -834,6 +1195,18 @@ class AgenteClaude:
                 "permissionDecision": "allow" if permitir else "deny",
                 "permissionDecisionReason": motivo,
             }}
+
+        async def post_web_search(entrada: Any, tool_use_id: str | None, _contexto: Any) -> dict[str, Any]:
+            """Junta las URLs de los resultados de WebSearch (las únicas que WebFetch puede abrir)."""
+            try:
+                if entrada.get("tool_name") == "WebSearch":
+                    urls = urls_de_resultado(entrada.get("tool_response"))
+                    async with politica:
+                        estado.anotar_urls(urls)
+                    registro.resultados_busqueda(tool_use_id or entrada.get("tool_use_id"), len(urls))
+            except Exception as e:  # noqa: BLE001 — sin URLs, WebFetch se deniega: no hace falta más
+                registro(f"aviso: no pude leer el resultado de WebSearch ({e.__class__.__name__})")
+            return {}
 
         sistema: Any = trabajo.prompt_sistema
         if len(sistema) > LARGO_PROMPT_ARGV:
@@ -853,11 +1226,17 @@ class AgenteClaude:
                 raise SinCreditos(API, "clave_invalida", "no hay ANTHROPIC_API_KEY en Classmer-data\\.env",
                                   espera_s=ESPERA_CUOTA_S)
             entorno["ANTHROPIC_API_KEY"] = clave
+        web = estado.web
+        hooks: dict[str, Any] = {"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use], timeout=60)]}
+        if web is not None:
+            # Segundo candado del tope de búsquedas, además del hook (lo cuenta el CLI por llamada).
+            entorno["CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION"] = str(web.max_busquedas)
+            hooks["PostToolUse"] = [HookMatcher(matcher="WebSearch", hooks=[post_web_search], timeout=60)]
 
         return ClaudeAgentOptions(
-            tools=list(HERRAMIENTAS),
+            tools=herramientas(web),
             allowed_tools=[],
-            disallowed_tools=list(PROHIBIDAS),
+            disallowed_tools=prohibidas(web),
             system_prompt=sistema,
             permission_mode="dontAsk",   # lo que el hook no permite explícitamente, se deniega
             cwd=str(estado.workdir),
@@ -867,10 +1246,10 @@ class AgenteClaude:
             strict_mcp_config=True,
             model=trabajo.modelo or None,
             effort=trabajo.esfuerzo or None,  # el SDK lo pasa como `--effort <nivel>` al CLI
-            max_turns=MAX_TURNOS,
+            max_turns=max_turnos(web),
             verbatim_prompts=True,       # el transcript no puede disparar @archivo ni /comandos
             env=entorno,
-            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use], timeout=60)]},
+            hooks=hooks,
             stderr=stderr,
             # Un Read de una foto vuelve en base64 dentro de UN mensaje del CLI: con el tope por
             # defecto del SDK (1 MiB) una foto real del celu lo rompía. Es sólo un tope.
@@ -1001,6 +1380,9 @@ class AgenteClaude:
                 corrida.turnos += ronda.turnos
                 if m.total_cost_usd is not None:  # el CLI informa el acumulado de la sesión
                     corrida.costo = max(corrida.costo or 0.0, float(m.total_cost_usd))
+                consultas = consultas_web(m.model_usage)  # también acumulado
+                if consultas is not None:
+                    corrida.consultas_web = max(corrida.consultas_web or 0, consultas)
                 if ronda.es_error:
                     detalle = "; ".join(m.errors or []) or ronda.texto_final or m.subtype
                     ronda.error = f"{m.subtype}: {detalle}"[:1000]

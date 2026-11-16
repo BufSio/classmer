@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block titulo %}Invitados{% endblock %}
+{% block cabeza %}
+<style>
+.materias-invitado { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 10px 0; }
+.materias-invitado label { white-space: nowrap; }
+.materias-invitado .inactiva { color: var(--suave); }
+.invitado .cabeza { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.invitado .cabeza strong { font-size: 16px; }
+input[type=email] { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--borde);
+                    border-radius: 6px; background: var(--panel); color: var(--texto); min-width: 280px; }
+</style>
+{% endblock %}
+{% block contenido %}
+{% macro casillas(elegidas) -%}
+<div class="materias-invitado">
+  {% for m in materias_orden %}
+  <label class="{{ '' if m.activa else 'inactiva' }}"><input type="checkbox" name="materias" value="{{ m.id }}"{% if m.id in elegidas %} checked{% endif %}>
+    {{ m.nombre }}{% if not m.activa %} <span class="etiqueta">inactiva</span>{% endif %}</label>
+  {% else %}
+  <span class="vacio">No hay materias en config.yaml.</span>
+  {% endfor %}
+</div>
+{%- endmacro %}
+<h1>Invitados</h1>
+<p class="sub">Gente que ve tus clases por <strong>{{ ('https://' ~ dominio_publico ~ '/panel') if dominio_publico else 'el dominio' }}</strong>, sólo para leer: las clases y los pendientes de las materias que le marques acá, con el apunte, los transcripts, el audio, las fotos y los adjuntos. Entra sólo con Cloudflare Access (el código por mail), sin la contraseña del panel. No ve las notas ni las marcas de la app, ni nada de cómo se procesó la clase, y no puede cambiar nada.</p>
+
+<div class="msg aviso">
+  Para que un mail nuevo pueda entrar, también tiene que estar en la policy de Cloudflare Access de la aplicación <strong>Panel Classmer</strong> (eso no se maneja desde acá).
+  Sacar a alguien de esta página lo deja afuera enseguida, desde su próximo pedido, aunque siga en Cloudflare.
+</div>
+{% if not dominio_publico or not access_completa %}
+<p class="aviso-texto">El panel todavía no se abre por el dominio (falta <code>panel.dominio_publico</code> o <code>panel.cloudflare_access</code> en config.yaml): los invitados no pueden entrar hasta que esté.</p>
+{% endif %}
+
+{% for inv in invitados %}
+<div class="tarjeta invitado">
+  <div class="cabeza">
+    <strong>{{ inv.email }}</strong>
+    <span class="chico">{% if inv.ultima %}entró por última vez {{ inv.ultima[0] | hora }} (desde {{ inv.ultima[1] }}){% else %}no entró desde el último reinicio del server{% endif %}</span>
+  </div>
+  <form method="post" action="/panel/invitados/guardar">
+    <input type="hidden" name="email" value="{{ inv.email }}">
+    {{ casillas(inv.materias) }}
+    <div class="acciones">
+      <button type="submit" class="primario">Guardar</button>
+      {% if not inv.materias %}<span class="aviso-texto">No ve ninguna materia.</span>{% endif %}
+    </div>
+  </form>
+  <form method="post" action="/panel/invitados/sacar" class="linea" style="margin-top:10px"
+        onsubmit="return confirm({{ ('¿Sacar a ' ~ inv.email ~ '? Deja de entrar desde su próximo pedido.') | tojson }});">
+    <input type="hidden" name="email" value="{{ inv.email }}">
+    <button type="submit" class="peligro mini">Sacar</button>
+  </form>
+</div>
+{% else %}
+<p class="vacio">Todavía no hay invitados.</p>
+{% endfor %}
+
+<form method="post" action="/panel/invitados/agregar" class="tarjeta">
+  <h2 style="margin-top:0">Agregar un invitado</h2>
+  <label for="email-nuevo">Mail (el mismo con el que pasa Cloudflare Access)</label><br>
+  <input type="email" id="email-nuevo" name="email" required placeholder="alguien@ejemplo.com" style="margin-top:4px">
+  {{ casillas([]) }}
+  <div class="acciones">
+    <button type="submit" class="primario">Agregar</button>
+    <span class="chico">Las materias nuevas no las ve hasta que se las marques.{% if duenos %} Los dueños ({{ duenos | join(', ') }}) no pueden ser invitados.{% endif %}</span>
+  </div>
+</form>
+{% endblock %}

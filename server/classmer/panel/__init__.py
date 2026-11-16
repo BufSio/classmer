@@ -1,8 +1,24 @@
-"""Panel web (§13): lo sirve el mismo server en /panel, sólo desde la PC y sin token.
+"""Panel web (§13): lo sirve el mismo server en /panel; desde la PC sin nada y desde la red con contraseña.
 
-- `SoloLocal` deja pasar sólo clientes 127.0.0.1 o ::1 (desde la LAN o el WireGuard, 403), con un
-  Host de loopback (contra DNS rebinding) y, en los POST, un Origin del mismo panel (contra otra
-  página abierta en el navegador que mande formularios a 127.0.0.1).
+- `AccesoPanel` decide quién entra (ninguno usa el token de la app):
+  - desde la PC (127.0.0.1 o ::1), sin contraseña, con un Host de loopback (contra DNS rebinding);
+  - desde la red (la LAN o el WireGuard del router), sólo con la cookie de sesión que da
+    /panel/entrar con la contraseña, y con un Host que sea una IP o un nombre de la LAN. Sin
+    contraseña puesta, 403 como antes. /panel/acceso (poner, cambiar o quitar la contraseña y
+    cerrar las sesiones) da 403 desde la red aunque haya sesión;
+  - por el dominio público (`panel.dominio_publico`, con Cloudflare Tunnel y Access adelante): es
+    "desde la red" aunque el socket sea 127.0.0.1, con un candado más, el JWT de Access, que se
+    valida en cada pedido. Se reconoce por el Host o por los encabezados de Cloudflare, y esos
+    encabezados sólo valen con el Host exacto del dominio (si no, 403). La cookie va con Secure;
+    el tope de intentos usa `Cf-Connecting-IP` si el socket es loopback (`cloudflared` es local);
+  - en los POST, en los tres casos, un Origin del mismo panel (contra otra página abierta en el
+    navegador que mande formularios al server).
+  Por el dominio, el mail del JWT decide el rol en cada pedido (`cloudflare.identidad`): el dueño sigue
+  con la contraseña y la cookie; un invitado (`panel.invitados`) entra sin contraseña, sólo con GET y
+  HEAD y sólo a las rutas de `RUTAS_INVITADO` (todo lo demás, 403), y ve sólo las clases de sus
+  materias (las otras dan 404, en `_sesion_o_404`).
+  La contraseña (hash scrypt), la cookie firmada y el tope de intentos están en `classmer.panel.acceso`;
+  el JWT de Access, en `classmer.panel.cloudflare`.
 - HTML generado en el server con Jinja2; formularios comunes (POST → redirect) y un poco de JS
   para el reproductor. Sin compilar nada.
 - Los adjuntos de una clase se ven, se abren, se bajan y se suben desde la PC con el mismo
@@ -15,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -23,6 +40,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import AsyncExitStack
 from datetime import datetime
@@ -30,25 +48,32 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+                               Response)
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import Headers, UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.requests import cookie_parser
+from starlette.routing import compile_path
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from classmer import adjuntos, importador, materias, revision, sesiones
 from classmer import audio as audio_mod
 from classmer.borrado import borrar_sesion, se_puede_borrar
-from classmer.config import ESFUERZOS, FACTURACIONES, PROMPTS_DIR, REVISION_DEFAULT, Config, ConfigError
+from classmer.config import ESFUERZOS, FACTURACIONES, PROMPTS_DIR, REVISION_DEFAULT, Config, ConfigError, Panel
 from classmer.config_vivo import MateriaNoExiste, materia_cruda
 from classmer.ia import modelos
 from classmer.ia.facturacion import (API, ETIQUETA_MEDIO, MAX, NOMBRE_MEDIO, Facturacion, despertar_pospuestos,
                                      texto_costo)
 from classmer.importador import AudioGrande, ErrorImportacion
 from classmer.panel import importar as panel_importar
+from classmer.panel.acceso import (DURACION_SESION_S, MIN_CONTRASENA, Acceso, ErrorContrasena, es_cliente_local,
+                                   host_de_red_valido, ips_de_la_pc, siguiente_seguro)
+from classmer.panel.cloudflare import (ENCABEZADO_JWT, AccesoInvalido, ClavesNoDisponibles, Identidad,
+                                       VerificadorAccess, trae_encabezados_cloudflare)
 from classmer.panel.importar import ErrorRecepcion
 from classmer.pipeline import ETAPAS
 from classmer.pipeline.linea_de_tiempo import CARPETA_FOTOS
@@ -68,7 +93,8 @@ CARPETAS_FOTOS = ("fotos", CARPETA_FOTOS)
 LOG_SERVER = "classmer.log"
 SECCIONES = {"clases.html": "clases", "clase.html": "clases", "importar.html": "clases", "materias.html": "materias",
              "materia.html": "materias", "pendientes.html": "pendientes", "pendientes_resumen.html": "pendientes",
-             "estilo.html": "estilo", "modelos.html": "modelos", "estado.html": "estado"}
+             "estilo.html": "estilo", "modelos.html": "modelos", "estado.html": "estado", "acceso.html": "acceso",
+             "invitados.html": "invitados"}
 _TIEMPO_RE = re.compile(r"^\[(\d{1,2}:\d{2}:\d{2})\]\s?(.*)$")
 # Archivos de una versión interna del apunte: sesiones/<id>/apunte/vN/apunte.pdf|tex (N en dígitos
 # ASCII y sin ceros adelante: "v١.pdf" o "v01.pdf" no son otro nombre de la v1).
@@ -81,6 +107,9 @@ TRANSCRIPTS = {
     "celu": ("transcript.celu.md", "Crudo del celu"),
     "cambios": ("revision/cambios.md", "Cambios de la revisión"),
 }
+# Cómo se llama cada transcript al bajarlo ("Macro 2026-11-05 - transcript crudo.md").
+NOMBRES_TRANSCRIPT = {"clase": "transcript", "crudo": "transcript crudo", "celu": "transcript crudo del celu",
+                      "cambios": "cambios de la revisión"}
 # Los archivos del apunte se revalidan siempre: sin Cache-Control, el navegador guardaba el PDF
 # horas (caché heurística) y seguía mostrando una versión vieja.
 SIN_CACHE = {"Cache-Control": "no-cache"}
@@ -115,49 +144,293 @@ GRUPO_PROVEEDOR = {modelos.ANTHROPIC: "Claude (Anthropic)", modelos.GOOGLE: "Gem
 REDESCUBRIENDO = threading.Lock()
 
 
-# --- sólo desde la PC --------------------------------------------------------------------------
+# --- quién entra: la PC sin nada, la red con contraseña ------------------------------------------
+
+RUTAS_SIN_SESION = ("/panel/entrar", "/panel/salir")
+EMAIL_ACCESS = "classmer.email_access"   # en el scope: el mail del JWT de Access (por el dominio)
+# El plan gratis de Cloudflare corta las subidas de más de 100 MB: por el dominio se avisa.
+TOPE_SUBIDA_DOMINIO = 100 * 1000 * 1000
+
+# --- invitados de sólo lectura (por el dominio) ---
+IDENTIDAD = "classmer.identidad"   # en el scope: quién es por el dominio (cloudflare.Identidad)
+METODOS_INVITADO = ("GET", "HEAD")
+# Lo único que puede pedir un invitado: la plantilla de la ruta del router que atiende el pedido tiene
+# que estar acá (se busca como lo hace el router, así una ruta nueva que tape a una de estas tampoco
+# pasa). Una ruta nueva queda prohibida para el invitado hasta que alguien la sume a propósito, después
+# de revisar que no escribe nada ni dispara trabajo. Las de una clase pasan por `_sesion_o_404`.
+RUTAS_INVITADO = frozenset({
+    "/panel",
+    "/panel/clases",
+    "/panel/clases/{sesion_id}",
+    "/panel/clases/{sesion_id}/apunte.pdf",
+    "/panel/clases/{sesion_id}/apunte.tex",
+    "/panel/clases/{sesion_id}/apunte/{archivo}",
+    "/panel/clases/{sesion_id}/audio",
+    "/panel/clases/{sesion_id}/audio-celu",
+    "/panel/clases/{sesion_id}/archivo/{ruta:path}",
+    "/panel/clases/{sesion_id}/adjuntos/{nombre}",
+    "/panel/clases/{sesion_id}/transcript/{cual}",
+    "/panel/pendientes",
+})
+# Las notas y las marcas que el usuario escribe en clase desde la app: el invitado no las ve (no se habló,
+# 7/11). Con True las ve en la clase y en la línea de tiempo.
+INVITADO_VE_NOTAS = False
+_NOTA_O_MARCA_RE = re.compile(r"^(NOTA|MARCA)\b")
+# Lo de la sesión que ve un invitado (nada de cómo se procesó: error, ruta publicada, dispositivo…).
+CAMPOS_SESION_INVITADO = ("id", "materia_id", "titulo", "numero_clase", "inicio", "tipo_clase", "estado",
+                          "importada", "duracion_ms")
+# El log anota las páginas que abre un invitado, no lo que el navegador pide para mostrarlas (las fotos
+# de la clase, el PDF del iframe, los pedazos del audio): Sec-Fetch-Dest de una página, o sin él (curl).
+DESTINOS_PAGINA = ("", "document")
+
+
+def rutas_del_router(router: Any, prefijo: str = "") -> list[tuple[str, Any]]:
+    """(plantilla, ruta) de todas las rutas, en el orden en que el router las prueba. Entra en los
+    routers incluidos (FastAPI 0.143 los anida en lugar de copiar sus rutas)."""
+    salida: list[tuple[str, Any]] = []
+    for ruta in getattr(router, "routes", ()):
+        incluido = getattr(ruta, "original_router", None)
+        if incluido is not None:
+            extra = getattr(getattr(ruta, "include_context", None), "prefix", "") or ""
+            salida += rutas_del_router(incluido, prefijo + extra)
+        elif isinstance(getattr(ruta, "path", None), str):
+            salida.append((prefijo + ruta.path, ruta))
+    return salida
+
+
+def plantilla_que_atiende(scope: Scope) -> str | None:
+    """La plantilla de la ruta que va a atender el pedido: la primera que coincide en ruta y método,
+    como el router (con la expresión que compiló el router para esa ruta), o None si no hay."""
+    camino, metodo = scope.get("path", ""), scope.get("method", "")
+    for plantilla, ruta in rutas_del_router(getattr(scope.get("app"), "router", None)):
+        regex = getattr(ruta, "path_regex", None)
+        if regex is None:
+            continue
+        if plantilla != ruta.path:  # un router incluido con prefijo
+            regex = compile_path(plantilla)[0]
+        if regex.match(camino) and metodo in (getattr(ruta, "methods", None) or ()):
+            return plantilla
+    return None
+
+
+def es_pagina(scope: Scope) -> bool:
+    encabezados = Headers(scope=scope)
+    return (scope.get("method") == "GET" and "range" not in encabezados
+            and encabezados.get("sec-fetch-dest", "").strip().lower() in DESTINOS_PAGINA)
+
+
+class VisitasInvitados:
+    """La última vez que se vio a cada invitado, con su IP. En memoria: desde el último reinicio."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ultima: dict[str, tuple[float, str]] = {}
+
+    def anotar(self, email: str, ip: str, cuando: float | None = None) -> None:
+        with self._lock:
+            self._ultima[email] = (time.time() if cuando is None else cuando, ip)
+
+    def ultima(self, email: str) -> tuple[float, str] | None:
+        with self._lock:
+            return self._ultima.get(email)
+
 
 def es_ruta_panel(ruta: str) -> bool:
     return ruta in ("/", "/panel") or ruta.startswith("/panel/")
 
 
+def es_ruta_acceso(ruta: str) -> bool:
+    return ruta == "/panel/acceso" or ruta.startswith("/panel/acceso/")
+
+
 def _host(valor: str) -> str:
     """'127.0.0.1:8000' → '127.0.0.1'; '[::1]:8000' → '::1'."""
-    return (urlsplit(f"//{valor}").hostname or "").lower()
+    try:
+        return (urlsplit(f"//{valor}").hostname or "").lower()
+    except ValueError:  # p. ej. '[::1' o un puerto que no es número
+        return ""
 
 
-def _cliente_local(host: str) -> bool:
-    return host in ("127.0.0.1", "::1") or host.startswith("::ffff:127.")
+def puerto_de(scope: Scope) -> int | None:
+    """El puerto en que escucha el server (para el nombre de la cookie y las URLs que se muestran)."""
+    servidor = scope.get("server") or (None, None)
+    return servidor[1] if len(servidor) > 1 else None
 
 
-class SoloLocal:
-    """Middleware ASGI: el panel sólo responde a la PC."""
+def url_acceso_local(scope: Scope) -> str:
+    puerto = puerto_de(scope)
+    return f"http://127.0.0.1{f':{puerto}' if puerto else ''}/panel/acceso"
 
-    def __init__(self, app: ASGIApp):
+
+def _ruta_pedida(scope: Scope) -> str:
+    """La ruta tal como llegó (ya codificada), con su query: adonde volver después de entrar."""
+    crudo = scope.get("raw_path")
+    ruta = crudo.decode("latin-1") if isinstance(crudo, bytes) and crudo else quote(scope.get("path", "/"))
+    query = scope.get("query_string", b"").decode("latin-1")
+    return f"{ruta}?{query}" if query else ruta
+
+
+def por_el_dominio(encabezados: Headers, panel: Panel) -> bool:
+    """El pedido llega (o dice llegar) por el dominio público: Host del dominio o encabezados de Cloudflare."""
+    if trae_encabezados_cloudflare(encabezados):
+        return True
+    return panel.dominio_publico is not None and _host(encabezados.get("host", "")).rstrip(".") == panel.dominio_publico
+
+
+def _cliente(scope: Scope) -> str:
+    return (scope.get("client") or ("", 0))[0] or ""
+
+
+def es_de_la_pc(scope: Scope, panel: Panel) -> bool:
+    """La PC del server (el dueño, sin contraseña): loopback y no por el dominio. El Host de loopback
+    lo exige el middleware."""
+    return es_cliente_local(_cliente(scope)) and not por_el_dominio(Headers(scope=scope), panel)
+
+
+def ip_del_cliente(scope: Scope, panel: Panel) -> str:
+    """La IP para el tope de intentos y los logs: por el dominio y desde loopback (`cloudflared` corre en
+    la PC), la de `Cf-Connecting-IP`; si no, la del socket, aunque el pedido traiga el encabezado."""
+    socket_ip = _cliente(scope)
+    encabezados = Headers(scope=scope)
+    if es_cliente_local(socket_ip) and por_el_dominio(encabezados, panel):
+        try:
+            return str(ipaddress.ip_address(encabezados.get("cf-connecting-ip", "").strip()))
+        except ValueError:
+            pass
+    return socket_ip
+
+
+class AccesoPanel:
+    """Middleware ASGI: quién puede usar el panel (ver el docstring del módulo)."""
+
+    def __init__(self, app: ASGIApp, acceso: Acceso, cfg: Config, verificador: VerificadorAccess,
+                 visitas: VisitasInvitados | None = None):
         self.app = app
+        self.acceso = acceso
+        self.cfg = cfg
+        self.verificador = verificador
+        self.visitas = visitas or VisitasInvitados()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and es_ruta_panel(scope.get("path", "")):
-            motivo = self._rechazo(scope)
-            if motivo:
-                await PlainTextResponse(motivo, status_code=403)(scope, receive, send)
+            scope.pop(IDENTIDAD, None)  # lo pone sólo este filtro, en cada pedido
+            respuesta = await self._filtro(scope)
+            if respuesta is not None:
+                await respuesta(scope, receive, send)
+                return
+            quien = scope.get(IDENTIDAD)
+            if quien is not None and quien.es_invitado:
+                await self._como_invitado(scope, receive, send, quien)
                 return
         await self.app(scope, receive, send)
 
-    @staticmethod
-    def _rechazo(scope: Scope) -> str | None:
-        cliente = (scope.get("client") or ("", 0))[0] or ""
-        if not _cliente_local(cliente):
-            return "El panel de Classmer sólo responde desde la PC (http://127.0.0.1)."
+    async def _como_invitado(self, scope: Scope, receive: Receive, send: Send, quien: Identidad) -> None:
+        """Un pedido permitido de un invitado: anota la visita y, si es una página, una línea en el log."""
+        ip = ip_del_cliente(scope, self.cfg.panel)
+        self.visitas.anotar(quien.email, ip)
+        estado = {"codigo": 0}
+
+        async def enviar(mensaje: Message) -> None:
+            if mensaje["type"] == "http.response.start":
+                estado["codigo"] = mensaje["status"]
+            await send(mensaje)
+
+        try:
+            await self.app(scope, receive, enviar)
+        finally:
+            if es_pagina(scope):
+                codigo = estado["codigo"]
+                log.info("panel: el invitado %s abrió %s (%s)%s", quien.email, _ruta_pedida(scope)[:300], ip,
+                         f" → {codigo}" if codigo >= 400 or not codigo else "")
+
+    async def _filtro(self, scope: Scope) -> Response | None:
         encabezados = Headers(scope=scope)
         host = encabezados.get("host", "")
-        if _host(host) not in HOSTS_LOCALES:
-            return "Abrí el panel como http://127.0.0.1:<puerto>/panel."
-        if scope.get("method", "GET") not in METODOS_SEGUROS:
-            origen = encabezados.get("origin") or encabezados.get("referer")
-            if origen is not None and urlsplit(origen).netloc.lower() != host.lower():
-                return "Pedido rechazado: no viene del panel."
-        return None
+        metodo = scope.get("method", "GET")
+        if por_el_dominio(encabezados, self.cfg.panel):
+            return await self._por_el_dominio(scope, encabezados, host, metodo)
+        if es_cliente_local(_cliente(scope)):
+            if _host(host) not in HOSTS_LOCALES:
+                return _rechazo("Abrí el panel como http://127.0.0.1:<puerto>/panel.")
+            if metodo not in METODOS_SEGUROS and not _mismo_origen(encabezados, host):
+                return _rechazo("Pedido rechazado: no viene del panel.")
+            return None
+        # Desde la red (la LAN o el WireGuard del router).
+        if not host_de_red_valido(_host(host)):
+            return _rechazo("Abrí el panel con la IP de la PC del server: la muestra la página Acceso, en esa PC.")
+        return self._con_sesion(scope, encabezados, host, metodo)
+
+    async def _por_el_dominio(self, scope: Scope, encabezados: Headers, host: str, metodo: str) -> Response | None:
+        """Cloudflare Tunnel + Access: el Host exacto del dominio y un JWT de Access válido. Después, el
+        dueño sigue como desde la red (contraseña y cookie) y el invitado, por la lista blanca."""
+        panel = self.cfg.panel
+        if panel.dominio_publico is None or _host(host).rstrip(".") != panel.dominio_publico:
+            # Encabezados de Cloudflare con otro Host (otro dominio de la misma aplicación de Access,
+            # 127.0.0.1, una IP de la LAN): no es el panel por su dominio.
+            return _rechazo("Por internet, el panel se abre sólo en su dominio.")
+        if not panel.cloudflare_access.completa:
+            return _rechazo("El panel no se abre por el dominio: falta panel.cloudflare_access en config.yaml.")
+        try:
+            quien = await run_in_threadpool(self.verificador.verificar, encabezados.get(ENCABEZADO_JWT), panel)
+        except AccesoInvalido as e:
+            log.warning("panel: pedido por el dominio rechazado, no pasó por Cloudflare Access (%s, desde %s): %s",
+                        scope.get("path", ""), ip_del_cliente(scope, panel), e)
+            return _rechazo("Pedido rechazado: no pasó por Cloudflare Access.")
+        except ClavesNoDisponibles:
+            return PlainTextResponse("No pude bajar las claves de Cloudflare Access para validar el pedido: "
+                                     "probá de nuevo en un rato.", status_code=503, headers={"Retry-After": "60"})
+        scope[EMAIL_ACCESS] = quien.email
+        scope[IDENTIDAD] = quien
+        if quien.es_invitado:
+            return self._filtro_invitado(scope, quien, metodo)
+        return self._con_sesion(scope, encabezados, host, metodo)
+
+    def _filtro_invitado(self, scope: Scope, quien: Identidad, metodo: str) -> Response | None:
+        """Sólo lectura: GET o HEAD, y sólo las rutas de RUTAS_INVITADO. Sin contraseña ni cookie (una
+        cookie de dueño no lo hace dueño). /panel/entrar lo manda a las clases."""
+        ruta = scope.get("path", "")
+        if metodo in METODOS_INVITADO and ruta == "/panel/entrar":
+            return RedirectResponse("/panel/clases", status_code=303)
+        if metodo in METODOS_INVITADO and plantilla_que_atiende(scope) in RUTAS_INVITADO:
+            return None
+        log.warning("panel: el invitado %s pidió %s %s (%s): no lo puede pedir (sólo lectura)", quien.email,
+                    metodo, _ruta_pedida(scope)[:300], ip_del_cliente(scope, self.cfg.panel))
+        return _rechazo("Tu acceso al panel de Classmer es de sólo lectura: podés ver las clases y los "
+                        "pendientes de tus materias, nada más.")
+
+    def _con_sesion(self, scope: Scope, encabezados: Headers, host: str, metodo: str) -> Response | None:
+        """Desde la red o por el dominio: el mismo origen, nunca /panel/acceso, la contraseña y la cookie."""
+        ruta = scope.get("path", "")
+        if metodo not in METODOS_SEGUROS and not _mismo_origen(encabezados, host):
+            return _rechazo("Pedido rechazado: no viene del panel.")
+        if es_ruta_acceso(ruta):
+            return _rechazo("La contraseña del panel se pone, se cambia y se quita sólo en la PC del server: "
+                            f"{url_acceso_local(scope)}.")
+        if not self.acceso.estado().abierto:
+            return _rechazo("Desde otra PC, el panel de Classmer pide una contraseña y todavía no hay una. "
+                            f"Ponela en la PC del server: {url_acceso_local(scope)}.")
+        if ruta in RUTAS_SIN_SESION:
+            return None
+        cookies = cookie_parser(encabezados.get("cookie", ""))
+        if self.acceso.sesion_valida(cookies.get(Acceso.nombre_cookie(puerto_de(scope)))):
+            return None
+        if metodo in METODOS_SEGUROS:
+            return RedirectResponse(f"/panel/entrar?{urlencode({'siguiente': _ruta_pedida(scope)})}", status_code=303)
+        return _rechazo("Tu sesión del panel venció o se cerró: entrá de nuevo en /panel/entrar.")
+
+
+def _mismo_origen(encabezados: Headers, host: str) -> bool:
+    origen = encabezados.get("origin") or encabezados.get("referer")
+    if origen is None:
+        return True
+    try:
+        return urlsplit(origen).netloc.lower() == host.lower()
+    except ValueError:
+        return False
+
+
+def _rechazo(motivo: str) -> PlainTextResponse:
+    return PlainTextResponse(motivo, status_code=403)
 
 
 # --- helpers de vista --------------------------------------------------------------------------
@@ -371,6 +644,26 @@ def _estado_texto(estado: str | None, importada: Any = False) -> str:
     return "subiendo" if importada and estado == "grabando" else estado or ""
 
 
+_NO_VA_EN_NOMBRE = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
+
+
+def _descargar(valor: str) -> bool:
+    """`?descargar=1` (cualquier cosa menos vacío o 0): Content-Disposition attachment."""
+    return valor not in ("", "0")
+
+
+def _disposicion(tipo: str, nombre: str) -> str:
+    """Content-Disposition con el nombre, como lo arma FileResponse (filename* si no es ASCII simple)."""
+    citado = quote(nombre)
+    return f"{tipo}; filename*=utf-8''{citado}" if citado != nombre else f'{tipo}; filename="{nombre}"'
+
+
+def _minuto_nombre(ms: int) -> str:
+    """'00h01m01s': el minuto de una foto en un nombre de archivo (Windows no acepta ':')."""
+    s = ms // 1000
+    return f"{s // 3600:02d}h{s % 3600 // 60:02d}m{s % 60:02d}s"
+
+
 def _archivo_en(raiz: Path, ruta: Path) -> Path | None:
     """`ruta` resuelta si es un archivo dentro de `raiz` (nunca afuera, ni con '..' ni con enlaces)."""
     try:
@@ -384,8 +677,26 @@ def _archivo_en(raiz: Path, ruta: Path) -> Path | None:
 
 # --- router ------------------------------------------------------------------------------------
 
-def crear_router(cfg: Config) -> APIRouter:
-    router = APIRouter()
+def _lista_blanca_del_invitado(request: Request) -> None:
+    """Por las dudas, en cada ruta del panel: la que se está por ejecutar tiene que estar en
+    RUTAS_INVITADO si el pedido es de un invitado (el filtro de verdad es el middleware, antes de rutear)."""
+    quien = request.scope.get(IDENTIDAD)
+    if isinstance(quien, Identidad) and quien.es_invitado:
+        ruta = getattr(request.scope.get("route"), "path", None)
+        if ruta not in RUTAS_INVITADO or request.method not in METODOS_INVITADO:
+            raise HTTPException(403, "sólo lectura")
+
+
+def crear_router(cfg: Config, acceso: Acceso | None = None, verificador: VerificadorAccess | None = None,
+                 visitas: VisitasInvitados | None = None) -> APIRouter:
+    router = APIRouter(dependencies=[Depends(_lista_blanca_del_invitado)])
+    acceso = acceso or Acceso(cfg.home)
+    verificador = verificador or VerificadorAccess()
+    visitas = visitas or VisitasInvitados()
+
+    def lectura(ruta: str, **opciones: Any):
+        """Una ruta que se lee (GET y HEAD: el reproductor y curl -I preguntan con HEAD)."""
+        return router.api_route(ruta, methods=["GET", "HEAD"], **opciones)
     plantillas = Jinja2Templates(directory=str(PLANTILLAS))
     plantillas.env.filters["hhmmss"] = lambda ms: ms_a_hhmmss(ms or 0)
     plantillas.env.filters["fecha"] = lambda iso: _fecha(iso, cfg.zona_horaria)
@@ -415,6 +726,10 @@ def crear_router(cfg: Config) -> APIRouter:
         datos["cfg"] = cfg
         datos["nombre_materia"] = nombre_materia
         datos["seccion"] = SECCIONES.get(nombre, "")
+        datos["invitado"] = invitado_de(request)
+        datos["desde_la_pc"] = desde_la_pc(request)
+        datos["por_el_dominio"] = dominio(request)
+        datos["tope_dominio_mb"] = TOPE_SUBIDA_DOMINIO // (1000 * 1000)
         respuesta = plantillas.TemplateResponse(request, nombre, datos, status_code=status_code)
         # Por las dudas: una clave nunca sale en una página, aunque se cuele en un error o un log.
         if any(c.encode("utf-8") in respuesta.body for c in claves()):
@@ -448,17 +763,153 @@ def crear_router(cfg: Config) -> APIRouter:
         return {**sesiones.a_api(cfg, conn, fila),
                 "url_pdf": _url_pdf(fila["id"], sesiones.ruta_pdf_actual(cfg, conn, fila["id"]))}
 
+    def desde_la_pc(request: Request) -> bool:
+        return es_de_la_pc(request.scope, cfg.panel)
+
+    def dominio(request: Request) -> bool:
+        """Por el dominio público (https del lado del navegador): el middleware ya validó el JWT."""
+        return por_el_dominio(request.headers, cfg.panel)
+
+    def invitado_de(request: Request) -> Identidad | None:
+        """El invitado de sólo lectura de este pedido (lo decidió el middleware con el JWT), o None."""
+        quien = request.scope.get(IDENTIDAD)
+        return quien if isinstance(quien, Identidad) and quien.es_invitado else None
+
+    def nombre_descarga(s: Any, cosa: str, extension: str) -> str:
+        """Un nombre legible para bajar algo de una clase: 'Macro 2026-11-05 - apunte.pdf'."""
+        fecha = _fecha(s["inicio"], cfg.zona_horaria)[:10]
+        base = " ".join(p for p in (nombre_materia(s["materia_id"]), fecha) if p)
+        nombre = _NO_VA_EN_NOMBRE.sub("-", f"{base} - {cosa}").strip(" .")
+        return nombre + extension
+
+    # --- entrar y salir (desde la red) ---
+    def nombre_cookie(request: Request) -> str:
+        return Acceso.nombre_cookie(puerto_de(request.scope))
+
+    def pagina_entrar(request: Request, siguiente: str, error: str | None = None,
+                      status_code: int = 200) -> HTMLResponse:
+        respuesta = vista(request, "entrar.html", status_code=status_code, siguiente=siguiente, error=error,
+                          sin_nav=True, dias=DURACION_SESION_S // 86400, url_acceso=url_acceso_local(request.scope))
+        respuesta.headers["Cache-Control"] = "no-store"
+        return respuesta
+
+    @router.get("/panel/entrar", response_class=HTMLResponse)
+    def entrar(request: Request, siguiente: str = "") -> Response:
+        destino = siguiente_seguro(siguiente)
+        if desde_la_pc(request) or acceso.sesion_valida(request.cookies.get(nombre_cookie(request))):
+            return RedirectResponse(destino, status_code=303)
+        return pagina_entrar(request, destino)
+
+    @router.post("/panel/entrar")
+    async def entrar_post(request: Request) -> Response:
+        """Verifica la contraseña (scrypt, en el threadpool) con el tope de intentos por IP y global."""
+        datos = await formulario(request)
+        destino = siguiente_seguro(datos.get("siguiente"))
+        if desde_la_pc(request):
+            return RedirectResponse(destino, status_code=303)
+        ip = ip_del_cliente(request.scope, cfg.panel)
+        if not acceso.intentos.anotar(ip):
+            minutos = max(1, math.ceil(acceso.intentos.espera(ip) / 60))
+            log.warning("panel: tope de intentos de entrar (desde %s)", ip)
+            respuesta = pagina_entrar(
+                request, destino, status_code=429,
+                error=f"Demasiados intentos fallidos. Esperá {minutos} minuto{'s' if minutos != 1 else ''} y "
+                      "probá de nuevo (o entrá desde la PC del server).")
+            respuesta.headers["Retry-After"] = str(minutos * 60)
+            return respuesta
+        if not await run_in_threadpool(acceso.verificar, datos.get("contrasena", "")):
+            log.warning("panel: contraseña incorrecta (desde %s)", ip)
+            return pagina_entrar(request, destino, error="Contraseña incorrecta.", status_code=401)
+        acceso.intentos.bien(ip)
+        valor = acceso.emitir()
+        if valor is None:  # la quitaron mientras se verificaba
+            return _rechazo("El acceso desde la red se cerró.")
+        if dominio(request):
+            log.info("panel: entró un navegador por el dominio (%s, %s)", ip, request.scope.get(EMAIL_ACCESS))
+        else:
+            log.info("panel: entró una PC de la red (%s)", ip)
+        respuesta = RedirectResponse(destino, status_code=303)
+        # Por el dominio el navegador ve https: la cookie con Secure. En la LAN es http, como siempre.
+        respuesta.set_cookie(nombre_cookie(request), valor, max_age=DURACION_SESION_S, path="/",
+                             httponly=True, samesite="lax", secure=dominio(request))
+        return respuesta
+
+    @router.post("/panel/salir")
+    def salir(request: Request) -> RedirectResponse:
+        if desde_la_pc(request):
+            return RedirectResponse("/panel/clases", status_code=303)
+        respuesta = RedirectResponse(con_msg("/panel/entrar", "Saliste del panel en esta PC."), status_code=303)
+        respuesta.delete_cookie(nombre_cookie(request), path="/", httponly=True, samesite="lax",
+                                secure=dominio(request))
+        return respuesta
+
+    # --- acceso desde la red (sólo desde la PC) ---
+    def solo_desde_la_pc(request: Request) -> None:
+        """El middleware ya da 403 desde la red; esto es por las dudas."""
+        if not desde_la_pc(request):
+            raise HTTPException(403, "la contraseña del panel se cambia sólo desde la PC del server")
+
+    @router.get("/panel/acceso", response_class=HTMLResponse)
+    def acceso_ver(request: Request) -> HTMLResponse:
+        solo_desde_la_pc(request)
+        estado = acceso.estado()
+        puerto = puerto_de(request.scope) or cfg.servidor.port
+        urls = [f"http://{ip}:{puerto}/panel" for ip in ips_de_la_pc()]
+        panel = cfg.panel
+        return vista(request, "acceso.html", estado=estado, urls=urls, puerto=puerto, min_contrasena=MIN_CONTRASENA,
+                     fallidos=acceso.intentos.fallidos(), dias=DURACION_SESION_S // 86400,
+                     dominio_publico=panel.dominio_publico, access_completa=panel.cloudflare_access.completa,
+                     url_publica=f"https://{panel.dominio_publico}/panel" if panel.por_el_dominio else None,
+                     pedido_claves=verificador.ultimo)
+
+    @router.post("/panel/acceso/contrasena")
+    async def acceso_contrasena(request: Request) -> RedirectResponse:
+        solo_desde_la_pc(request)
+        datos = await formulario(request)
+        habia = acceso.estado().abierto
+        try:
+            await run_in_threadpool(acceso.poner, datos.get("contrasena", ""), datos.get("repetida", ""))
+        except ErrorContrasena as e:
+            return volver("/panel/acceso", str(e), "error")
+        if habia:
+            return volver("/panel/acceso", "Contraseña cambiada: las otras PCs tienen que entrar de nuevo.")
+        return volver("/panel/acceso", "Listo: el panel ya se abre desde las otras PCs de la red, con la contraseña.")
+
+    @router.post("/panel/acceso/cerrar-sesiones")
+    def acceso_cerrar_sesiones(request: Request) -> RedirectResponse:
+        solo_desde_la_pc(request)
+        if not acceso.cerrar_sesiones():
+            return volver("/panel/acceso", "No hay contraseña puesta: no hay sesiones para cerrar.", "aviso")
+        return volver("/panel/acceso", "Sesiones cerradas: las otras PCs tienen que volver a poner la contraseña.")
+
+    @router.post("/panel/acceso/cerrar")
+    def acceso_cerrar(request: Request) -> RedirectResponse:
+        solo_desde_la_pc(request)
+        if not acceso.quitar():
+            return volver("/panel/acceso", "El acceso desde la red ya estaba cerrado.", "aviso")
+        return volver("/panel/acceso", "Acceso desde la red cerrado: el panel vuelve a abrirse sólo en esta PC.")
+
     # --- inicio ---
     @router.get("/", include_in_schema=False)
-    @router.get("/panel", include_in_schema=False)
+    @lectura("/panel", include_in_schema=False)
     def inicio() -> RedirectResponse:
         return RedirectResponse("/panel/clases", status_code=303)
 
+    def materias_de(request: Request) -> list[Any]:
+        """Las materias que puede ver este pedido: todas, o las del invitado (en el orden de config.yaml)."""
+        quien = invitado_de(request)
+        return [m for m in cfg.materias if quien is None or m.id in quien.materias]
+
     # --- clases ---
-    @router.get("/panel/clases", response_class=HTMLResponse)
+    @lectura("/panel/clases", response_class=HTMLResponse)
     def clases(request: Request, materia: str | None = None, estado: str | None = None,
                limite: int = 100) -> HTMLResponse:
         filtros, params = [], []
+        quien = invitado_de(request)
+        if quien is not None:  # sólo sus materias, también con un ?materia= de otra (o "auto")
+            suyas = sorted(quien.materias)
+            filtros.append(f"materia_id IN ({', '.join('?' * len(suyas))})" if suyas else "0")
+            params.extend(suyas)
         if materia:
             filtros.append("materia_id = ?" if materia != "auto" else "materia_id IS NULL")
             if materia != "auto":
@@ -476,25 +927,37 @@ def crear_router(cfg: Config) -> APIRouter:
             lista = []
             for f in filas:
                 api = con_url_pdf(conn, f)
+                if quien is not None:  # ni el error ni los jobs en espera
+                    lista.append({**api, "error": None, "etapa": None, "adjuntos_sin_usar": 0,
+                                  "materia_nombre": nombre_materia(f["materia_id"]), "espera": None})
+                    continue
                 espera = conn.execute(
                     "SELECT error, run_after FROM jobs WHERE sesion_id = ? AND estado = 'pendiente' "
                     "AND run_after > ? ORDER BY run_after LIMIT 1", (f["id"], ahora)).fetchone()
                 lista.append({**api, "materia_nombre": nombre_materia(f["materia_id"]),
                               "espera": dict(espera) if espera else None})
         return vista(request, "clases.html", clases=lista, filtro_materia=materia or "",
-                     filtro_estado=estado or "", estados=sesiones.ESTADOS)
+                     filtro_estado=estado or "", estados=sesiones.ESTADOS, materias_filtro=materias_de(request))
 
-    def _sesion_o_404(conn, sesion_id: str):
+    def _sesion_o_404(request: Request, conn: sqlite3.Connection, sesion_id: str) -> sqlite3.Row:
+        """La sesión, o 404. Para un invitado, también 404 si no es de una de sus materias (ni si es Auto):
+        no se revela que existe. Todas las rutas de una clase pasan por acá."""
         try:
-            return sesiones.fila_sesion(conn, sesion_id)
+            s = sesiones.fila_sesion(conn, sesion_id)
         except NoExiste as e:
             raise HTTPException(404, "sesión no encontrada") from e
+        quien = invitado_de(request)
+        if quien is not None and s["materia_id"] not in quien.materias:
+            raise HTTPException(404, "sesión no encontrada")
+        return s
 
-    @router.get("/panel/clases/{sesion_id}", response_class=HTMLResponse)
+    @lectura("/panel/clases/{sesion_id}", response_class=HTMLResponse)
     def clase(request: Request, sesion_id: str) -> HTMLResponse:
+        if invitado_de(request) is not None:
+            return clase_solo_lectura(request, sesion_id)
         carpeta = cfg.sesion_dir(sesion_id)
         with ctx_de(request).base.conexion() as conn:
-            s = _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
             api = sesiones.a_api(cfg, conn, s)
             audio = sesiones.ruta_audio(cfg, conn, sesion_id)
             audio_panel = sesiones.ruta_audio_panel(cfg, conn, sesion_id)
@@ -551,6 +1014,60 @@ def crear_router(cfg: Config) -> APIRouter:
             transcripts=_transcripts_disponibles(carpeta),
         )
 
+    def clase_solo_lectura(request: Request, sesion_id: str) -> HTMLResponse:
+        """La clase para un invitado: el apunte (y sus versiones), los transcripts, el audio, las fotos,
+        los adjuntos, sus pendientes y la línea de tiempo. Nada de cómo se procesó (jobs, costos, log,
+        errores, dónde se publica, la importación, la revisión) ni las notas y marcas de la app: la
+        plantilla no lo muestra y acá ni se le pasa (si una plantilla se equivoca, no hay qué mostrar)."""
+        carpeta = cfg.sesion_dir(sesion_id)
+        with ctx_de(request).base.conexion() as conn:
+            fila = _sesion_o_404(request, conn, sesion_id)
+            s = {k: fila[k] for k in CAMPOS_SESION_INVITADO}
+            progreso = sesiones.calcular_progreso(conn, sesion_id)
+            audio = sesiones.ruta_audio(cfg, conn, sesion_id)
+            audio_panel = sesiones.ruta_audio_panel(cfg, conn, sesion_id)
+            eventos = [dict(e) | {"datos": json.loads(e["datos"] or "{}")} for e in conn.execute(
+                f"SELECT * FROM assets WHERE sesion_id = ? AND {sesiones.SOLO_EVENTOS} "
+                "ORDER BY offset_ms IS NULL, offset_ms, creado", (sesion_id,))]
+            lista_adjuntos = adjuntos.listar(conn, sesion_id)
+            items = conn.execute("SELECT id, tipo, texto, offset_ms, estado, fecha_limite FROM items "
+                                 "WHERE sesion_id = ? ORDER BY offset_ms, id", (sesion_id,)).fetchall()
+            apuntes = conn.execute("SELECT * FROM apuntes WHERE sesion_id = ? ORDER BY version DESC",
+                                   (sesion_id,)).fetchall()
+            actual = apunte_actual(conn, sesion_id)
+            ruta_pdf = sesiones.ruta_pdf_actual(cfg, conn, sesion_id)
+            celu = sesiones.datos_celu(conn, sesion_id)
+            audio_celu = sesiones.ruta_audio(cfg, conn, sesion_id, sesiones.PISTA_CELU)
+        transcript = leer_json(carpeta / "transcript.json", None) or []
+        timeline_txt = _leer_texto(carpeta / "timeline.md")
+        timeline = _lineas_con_tiempo(timeline_txt) if timeline_txt else None
+        if timeline is not None and not INVITADO_VE_NOTAS:
+            timeline = [l for l in timeline if not _NOTA_O_MARCA_RE.match(l["texto"])]
+        if not INVITADO_VE_NOTAS:
+            eventos = [e for e in eventos if e["tipo"] == "foto"]
+        versiones = _versiones(sesion_id, apuntes, actual, ruta_pdf, [])
+        vigente = versiones["actual"]
+        anteriores = [{"a": {"version": x["a"]["version"], "creado": x["a"]["creado"], "titulo": x["a"]["titulo"]},
+                       "pdf": x["pdf"], "tex": x["tex"]} for x in versiones["anteriores"]]
+        adjuntos_clase = [{k: a[k] for k in ("nombre_original", "descripcion", "bytes", "offset_ms", "url",
+                                             "url_descarga")}
+                          for a in _adjuntos_vista(sesion_id, lista_adjuntos, [])]
+        return vista(
+            request, "clase.html", s=s, api={"progreso": progreso}, materia_nombre=nombre_materia(s["materia_id"]),
+            hay_audio=audio.is_file() and audio.stat().st_size > 0, eventos=eventos,
+            fotos=[e for e in eventos if e["tipo"] == "foto" and e["ruta"]],
+            audio_reproducible=audio_panel.suffix.lower() in audio_mod.MIME_AUDIO,
+            transcript=transcript, timeline=timeline, items=items, url_pdf=_url_pdf(sesion_id, ruta_pdf),
+            duracion_ms=s["duracion_ms"] or max((seg.get("fin_ms") or 0 for seg in transcript), default=0),
+            actual={"version": vigente["version"], "creado": vigente["creado"]} if vigente is not None else None,
+            anteriores=anteriores, version_pdf=versiones["version_pdf"], hay_tex=versiones["hay_tex"],
+            hay_mas_nuevas=versiones["hay_mas_nuevas"], adjuntos_clase=adjuntos_clase,
+            celu={"desfase_ms": celu.get("desfase_ms")} if celu is not None else None,
+            hay_audio_celu=celu is not None and audio_celu.is_file(),
+            audio_celu_reproducible=audio_celu.suffix.lower() in audio_mod.MIME_AUDIO,
+            transcripts=_transcripts_disponibles(carpeta), ve_notas=INVITADO_VE_NOTAS,
+        )
+
     def _versiones(sesion_id: str, apuntes: list[sqlite3.Row], actual: sqlite3.Row | None,
                    ruta_pdf: Path | None, publicaciones: list[sqlite3.Row]) -> dict[str, Any]:
         """La versión vigente del apunte (la principal), las anteriores con sus archivos y, si la
@@ -593,82 +1110,110 @@ def crear_router(cfg: Config) -> APIRouter:
         relativa = actual["ruta_tex"] or f"apunte/v{actual['version']}/apunte.tex"
         return _archivo_en(carpeta, carpeta / relativa)
 
-    def _texto_plano(ruta: Path) -> PlainTextResponse:
+    def _texto_plano(ruta: Path, descarga: str | None = None) -> PlainTextResponse:
+        """Un .tex o un transcript como texto; con `descarga`, para bajar con ese nombre."""
+        encabezados = dict(SIN_CACHE)
+        if descarga is not None:
+            encabezados["Content-Disposition"] = _disposicion("attachment", descarga)
         return PlainTextResponse(sin_claves(ruta.read_text(encoding="utf-8", errors="replace")),
-                                 media_type="text/plain; charset=utf-8", headers=SIN_CACHE)
+                                 media_type="text/plain; charset=utf-8", headers=encabezados)
 
-    @router.get("/panel/clases/{sesion_id}/apunte.pdf")
-    def clase_pdf(request: Request, sesion_id: str) -> FileResponse:
+    def _archivo(ruta: Path, media_type: str | None, nombre: str, descargar: str, *,
+                 siempre_nombre: bool = False, encabezados: dict[str, str] | None = None) -> FileResponse:
+        """Un archivo de la clase: con ?descargar=1, attachment con un nombre legible. Si no, inline (con
+        ese nombre si `siempre_nombre`: el PDF, para cuando lo guardan desde el visor)."""
+        if _descargar(descargar):
+            return FileResponse(ruta, media_type=media_type, filename=nombre, content_disposition_type="attachment",
+                                headers=encabezados)
+        if siempre_nombre:
+            return FileResponse(ruta, media_type=media_type, filename=nombre, content_disposition_type="inline",
+                                headers=encabezados)
+        return FileResponse(ruta, media_type=media_type, headers=encabezados)
+
+    # Las rutas de lectura de una clase (también las del invitado: ver RUTAS_INVITADO). Ninguna escribe
+    # nada ni dispara trabajo. Con ?descargar=1 bajan el archivo con un nombre legible.
+    @lectura("/panel/clases/{sesion_id}/apunte.pdf")
+    def clase_pdf(request: Request, sesion_id: str, descargar: str = "") -> FileResponse:
         """El PDF vigente. Las páginas lo piden con la marca de _url_pdf (?v=…), que acá se ignora."""
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
             ruta = sesiones.ruta_pdf_actual(cfg, conn, sesion_id)
         if ruta is None:
             raise HTTPException(404, "el apunte todavía no está listo")
-        return FileResponse(ruta, media_type="application/pdf", filename="apunte.pdf",
-                            content_disposition_type="inline", headers=SIN_CACHE)
+        return _archivo(ruta, "application/pdf", nombre_descarga(s, "apunte", ".pdf"), descargar,
+                        siempre_nombre=True, encabezados=SIN_CACHE)
 
-    @router.get("/panel/clases/{sesion_id}/apunte.tex")
-    def clase_tex(request: Request, sesion_id: str) -> PlainTextResponse:
+    @lectura("/panel/clases/{sesion_id}/apunte.tex")
+    def clase_tex(request: Request, sesion_id: str, descargar: str = "") -> PlainTextResponse:
         """El .tex de la versión vigente (compile o no)."""
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
             actual = apunte_actual(conn, sesion_id)
         ruta = _tex_actual(sesion_id, actual) if actual is not None else None
         if ruta is None:
             raise HTTPException(404, "todavía no hay apunte")
-        return _texto_plano(ruta)
+        return _texto_plano(ruta, nombre_descarga(s, "apunte", ".tex") if _descargar(descargar) else None)
 
-    @router.get("/panel/clases/{sesion_id}/apunte/{archivo}")
-    def clase_version(request: Request, sesion_id: str, archivo: str):
+    @lectura("/panel/clases/{sesion_id}/apunte/{archivo}")
+    def clase_version(request: Request, sesion_id: str, archivo: str, descargar: str = ""):
         """PDF o .tex de una versión interna: sólo sesiones/<id>/apunte/vN/apunte.pdf|tex."""
         m = _VERSION_RE.fullmatch(archivo)
         if m is None:
             raise HTTPException(404, "archivo no encontrado")
         n, extension = int(m.group(1)), m.group(2)
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
         carpeta = cfg.sesion_dir(sesion_id)
         ruta = _archivo_en(carpeta, carpeta / "apunte" / f"v{n}" / f"apunte.{extension}")
         if ruta is None:
             raise HTTPException(404, "archivo no encontrado")
+        nombre = nombre_descarga(s, f"apunte v{n}", f".{extension}")
         if extension == "tex":
-            return _texto_plano(ruta)
-        return FileResponse(ruta, media_type="application/pdf", filename=f"apunte-v{n}.pdf",
-                            content_disposition_type="inline", headers=SIN_CACHE)
+            return _texto_plano(ruta, nombre if _descargar(descargar) else None)
+        return _archivo(ruta, "application/pdf", nombre, descargar, siempre_nombre=True, encabezados=SIN_CACHE)
 
-    @router.get("/panel/clases/{sesion_id}/audio")
-    def clase_audio(request: Request, sesion_id: str) -> FileResponse:
+    def _audio(ruta: Path, s: sqlite3.Row, cosa: str, descargar: str) -> FileResponse:
+        tipo = audio_mod.MIME_AUDIO.get(ruta.suffix.lower(), "application/octet-stream")
+        return _archivo(ruta, tipo, nombre_descarga(s, cosa, ruta.suffix.lower()), descargar)
+
+    @lectura("/panel/clases/{sesion_id}/audio")
+    def clase_audio(request: Request, sesion_id: str, descargar: str = "") -> FileResponse:
         """Lo que reproduce el panel: la copia en Opus (audio.panel.ogg) de un importado que el navegador
-        no reproduce, si verificar la armó; si no, el original. Con Range: el reproductor salta."""
+        no reproduce, si verificar la armó; si no, el original. Con Range: el reproductor salta. Para
+        bajar, el mismo archivo."""
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
             ruta = sesiones.ruta_audio_panel(cfg, conn, sesion_id)
         if not ruta.is_file():
             raise HTTPException(404, "no hay audio")
-        return FileResponse(ruta, media_type=audio_mod.MIME_AUDIO.get(ruta.suffix.lower(), "application/octet-stream"))
+        return _audio(ruta, s, "audio", descargar)
 
-    @router.get("/panel/clases/{sesion_id}/archivo/{ruta:path}")
-    def clase_archivo(request: Request, sesion_id: str, ruta: str) -> FileResponse:
+    @lectura("/panel/clases/{sesion_id}/archivo/{ruta:path}")
+    def clase_archivo(request: Request, sesion_id: str, ruta: str, descargar: str = "") -> FileResponse:
+        """Una foto de la clase (las de la app y las preparadas para el apunte), nunca otro archivo."""
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
-        carpeta = cfg.sesion_dir(sesion_id).resolve()
-        destino = (carpeta / ruta).resolve()
-        try:
-            relativa = destino.relative_to(carpeta)
-        except ValueError as e:
-            raise HTTPException(404, "archivo no encontrado") from e
-        if not relativa.parts or relativa.parts[0] not in CARPETAS_FOTOS or not destino.is_file():
-            raise HTTPException(404, "archivo no encontrado")
-        return FileResponse(destino)
+            s = _sesion_o_404(request, conn, sesion_id)
+            carpeta = cfg.sesion_dir(sesion_id).resolve()
+            destino = (carpeta / ruta).resolve()
+            try:
+                relativa = destino.relative_to(carpeta)
+            except ValueError as e:
+                raise HTTPException(404, "archivo no encontrado") from e
+            if not relativa.parts or relativa.parts[0] not in CARPETAS_FOTOS or not destino.is_file():
+                raise HTTPException(404, "archivo no encontrado")
+            foto = conn.execute("SELECT offset_ms FROM assets WHERE sesion_id = ? AND tipo = 'foto' AND ruta = ?",
+                                (sesion_id, relativa.as_posix())).fetchone()
+        cosa = (f"foto {_minuto_nombre(foto['offset_ms'])}" if foto is not None and foto["offset_ms"] is not None
+                else f"foto {destino.stem}")
+        return _archivo(destino, None, nombre_descarga(s, cosa, destino.suffix.lower()), descargar)
 
-    @router.get("/panel/clases/{sesion_id}/adjuntos/{nombre}")
+    @lectura("/panel/clases/{sesion_id}/adjuntos/{nombre}")
     def clase_adjunto(request: Request, sesion_id: str, nombre: str, descargar: str = "") -> FileResponse:
         """Un adjunto: el navegador lo abre (inline) o, con ?descargar=1, lo baja con el nombre original.
         Se busca en la base por la ruta que guardó el server (nunca se arma la ruta con lo que llega en
         la URL) y se revalida que el archivo esté dentro de sesiones/<id>/adjuntos."""
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            _sesion_o_404(request, conn, sesion_id)
             fila = conn.execute("SELECT * FROM assets WHERE sesion_id = ? AND tipo = ? AND ruta = ?",
                                 (sesion_id, adjuntos.TIPO_ASSET, f"{adjuntos.CARPETA}/{nombre}")).fetchone()
         if fila is None:
@@ -680,7 +1225,7 @@ def crear_router(cfg: Config) -> APIRouter:
             raise HTTPException(404, "no está el archivo del adjunto")
         # nosniff: el navegador respeta el tipo (el que se detectó por el contenido) y no adivina otro.
         return FileResponse(ruta, media_type=adjunto["mime"], filename=_nombre_descarga(adjunto),
-                            content_disposition_type="attachment" if descargar not in ("", "0") else "inline",
+                            content_disposition_type="attachment" if _descargar(descargar) else "inline",
                             headers={"X-Content-Type-Options": "nosniff"})
 
     @router.post("/panel/clases/{sesion_id}/adjuntos")
@@ -691,7 +1236,7 @@ def crear_router(cfg: Config) -> APIRouter:
         url = f"/panel/clases/{sesion_id}"
         base = ctx_de(request).base
         with base.conexion() as conn:  # 404 antes de recibir los archivos
-            _sesion_o_404(conn, sesion_id)
+            _sesion_o_404(request, conn, sesion_id)
         try:
             form = await request.form(max_files=MAX_ADJUNTOS_FORM, max_fields=20)
         except (StarletteHTTPException, MultiPartException, OSError) as e:
@@ -743,28 +1288,28 @@ def crear_router(cfg: Config) -> APIRouter:
                 salida.append({"cual": cual, "nombre": nombre})
         return salida
 
-    @router.get("/panel/clases/{sesion_id}/transcript/{cual}")
-    def clase_transcript(request: Request, sesion_id: str, cual: str) -> PlainTextResponse:
+    @lectura("/panel/clases/{sesion_id}/transcript/{cual}")
+    def clase_transcript(request: Request, sesion_id: str, cual: str, descargar: str = "") -> PlainTextResponse:
         """El transcript revisado, los crudos (el principal y el del celu) o el registro de cambios."""
         if cual not in TRANSCRIPTS:
             raise HTTPException(404, "archivo no encontrado")
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
         carpeta = cfg.sesion_dir(sesion_id)
         ruta = _archivo_en(carpeta, carpeta / TRANSCRIPTS[cual][0])
         if ruta is None:
             raise HTTPException(404, "todavía no está")
-        return _texto_plano(ruta)
+        return _texto_plano(ruta, nombre_descarga(s, NOMBRES_TRANSCRIPT[cual], ".md") if _descargar(descargar) else None)
 
-    @router.get("/panel/clases/{sesion_id}/audio-celu")
-    def clase_audio_celu(request: Request, sesion_id: str) -> FileResponse:
+    @lectura("/panel/clases/{sesion_id}/audio-celu")
+    def clase_audio_celu(request: Request, sesion_id: str, descargar: str = "") -> FileResponse:
         """El audio del celu (la segunda pista), con Range para saltar."""
         with ctx_de(request).base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            s = _sesion_o_404(request, conn, sesion_id)
             ruta = sesiones.ruta_audio(cfg, conn, sesion_id, sesiones.PISTA_CELU)
         if not ruta.is_file():
             raise HTTPException(404, "no hay audio del celu")
-        return FileResponse(ruta, media_type=audio_mod.MIME_AUDIO.get(ruta.suffix.lower(), "application/octet-stream"))
+        return _audio(ruta, s, "audio del celu", descargar)
 
     @router.post("/panel/clases/{sesion_id}/revision")
     async def clase_revision(request: Request, sesion_id: str) -> RedirectResponse:
@@ -773,7 +1318,7 @@ def crear_router(cfg: Config) -> APIRouter:
         url = f"/panel/clases/{sesion_id}"
         ctx = ctx_de(request)
         with ctx.base.conexion() as conn:
-            _sesion_o_404(conn, sesion_id)
+            _sesion_o_404(request, conn, sesion_id)
         accion = datos.get("accion", "guardar")
         if accion not in ("guardar", "listo", "sin_revisar"):
             return volver(url, f"Acción inválida: {accion!r}", "error")
@@ -809,7 +1354,7 @@ def crear_router(cfg: Config) -> APIRouter:
         url = f"/panel/clases/{sesion_id}"
         ctx = ctx_de(request)
         with ctx.base.conexion() as conn:  # 404 antes de recibir el audio
-            _sesion_o_404(conn, sesion_id)
+            _sesion_o_404(request, conn, sesion_id)
         try:
             form = await request.form(max_files=1, max_fields=10)
         except (StarletteHTTPException, MultiPartException, OSError) as e:
@@ -912,7 +1457,8 @@ def crear_router(cfg: Config) -> APIRouter:
         datos_js = {"materias": lista, "tipos_auto": tipos(sesiones.TIPOS_CLASE), "confirmacion": confirmacion,
                     "max_audio": sesiones.MAX_AUDIO_IMPORTADO, "max_foto": sesiones.MAX_FOTO,
                     "max_material": adjuntos.MAX_ADJUNTO, "max_fotos": panel_importar.MAX_FOTOS_FORM,
-                    "max_materiales": panel_importar.MAX_MATERIAL_FORM}
+                    "max_materiales": panel_importar.MAX_MATERIAL_FORM,
+                    "tope_dominio": TOPE_SUBIDA_DOMINIO if dominio(request) else None}
         return vista(request, "importar.html", materias_form=lista, datos_js=datos_js,
                      acepta_audio=panel_importar.ACEPTA_AUDIO, acepta_adjuntos=ACEPTA_ADJUNTOS,
                      tipos_adjunto=adjuntos.TEXTO_TIPOS, max_adjunto_mb=adjuntos.MAX_ADJUNTO // (1024 * 1024),
@@ -1107,9 +1653,9 @@ def crear_router(cfg: Config) -> APIRouter:
         return JSONResponse({"ok": True, "borrado": borrado})
 
     # --- materias ---
-    def _resumen_materias(conn) -> list[dict[str, Any]]:
+    def _resumen_materias(conn, lista: list[Any] | None = None) -> list[dict[str, Any]]:
         salida = []
-        for m in cfg.materias:
+        for m in cfg.materias if lista is None else lista:
             clases_total = conn.execute("SELECT COUNT(*) FROM sesiones WHERE materia_id = ?", (m.id,)).fetchone()[0]
             abiertos = conn.execute("SELECT COUNT(*) FROM items WHERE materia_id = ? AND estado = 'abierto'",
                                     (m.id,)).fetchone()[0]
@@ -1262,23 +1808,26 @@ def crear_router(cfg: Config) -> APIRouter:
         return volver(f"/panel/materias/{materia_id}", "Cambios guardados en config.yaml y aplicados.")
 
     # --- pendientes (dashboard por materia) ---
-    @router.get("/panel/pendientes", response_class=HTMLResponse)
+    @lectura("/panel/pendientes", response_class=HTMLResponse)
     def pendientes(request: Request, materia: str | None = None, ver: str = "abiertos") -> HTMLResponse:
+        visibles = materias_de(request)  # un invitado, sólo las suyas
         with ctx_de(request).base.conexion() as conn:
             if not materia:
-                return vista(request, "pendientes_resumen.html", materias=_resumen_materias(conn),
+                return vista(request, "pendientes_resumen.html", materias=_resumen_materias(conn, visibles),
                              por_tipo={m.id: dict(conn.execute(
                                  "SELECT tipo, COUNT(*) FROM items WHERE materia_id = ? AND estado = 'abierto' "
-                                 "GROUP BY tipo", (m.id,)).fetchall()) for m in cfg.materias})
+                                 "GROUP BY tipo", (m.id,)).fetchall()) for m in visibles})
             m = cfg.materia(materia)
-            if m is None:
+            if m is None or m not in visibles:
                 raise HTTPException(404, "materia no encontrada")
             filtro = "" if ver == "todos" else "AND i.estado = 'abierto'"
+            # Un ítem de una clase que ahora es de otra materia no se le muestra a un invitado.
+            de_la_materia = "AND (i.sesion_id IS NULL OR s.materia_id = i.materia_id)" if invitado_de(request) else ""
             filas = conn.execute(
                 f"""
                 SELECT i.*, s.inicio, s.numero_clase, s.titulo AS clase_titulo
                 FROM items i LEFT JOIN sesiones s ON s.id = i.sesion_id
-                WHERE i.materia_id = ? {filtro}
+                WHERE i.materia_id = ? {filtro} {de_la_materia}
                 ORDER BY s.inicio DESC, i.offset_ms, i.id
                 """, (materia,)).fetchall()
             recientes = [con_url_pdf(conn, f) for f in conn.execute(
@@ -1307,6 +1856,66 @@ def crear_router(cfg: Config) -> APIRouter:
             raise HTTPException(404, "item no encontrado")
         textos = {"hecho": "Marcado como hecho.", "descartado": "Descartado.", "abierto": "Reabierto."}
         return volver(volver_a, textos[estado])
+
+    # --- invitados (sólo el dueño: el invitado no llega acá, RUTAS_INVITADO) ---
+    URL_INVITADOS = "/panel/invitados"
+
+    def solo_el_dueno(request: Request) -> None:
+        """El middleware ya le da 403 al invitado; esto es por las dudas."""
+        if invitado_de(request) is not None:
+            raise HTTPException(403, "sólo lectura")
+
+    async def form_invitado(request: Request) -> tuple[str, list[str]]:
+        form = await request.form()
+        email = form.get("email")
+        return (email if isinstance(email, str) else ""), [m for m in form.getlist("materias") if isinstance(m, str)]
+
+    @router.get(URL_INVITADOS, response_class=HTMLResponse)
+    def invitados(request: Request) -> HTMLResponse:
+        solo_el_dueno(request)
+        orden = [m for m in cfg.materias if m.activa] + [m for m in cfg.materias if not m.activa]
+        lista = [{"email": i.email, "materias": set(i.materias), "ultima": visitas.ultima(i.email)}
+                 for i in cfg.panel.invitados]
+        panel = cfg.panel
+        return vista(request, "invitados.html", invitados=lista, materias_orden=orden,
+                     dominio_publico=panel.dominio_publico, access_completa=panel.cloudflare_access.completa,
+                     duenos=panel.cloudflare_access.emails)
+
+    @router.post(f"{URL_INVITADOS}/agregar")
+    async def invitados_agregar(request: Request) -> RedirectResponse:
+        solo_el_dueno(request)
+        email, elegidas = await form_invitado(request)
+        try:
+            email = request.app.state.config_viva.poner_invitado(email, elegidas, nuevo=True)
+        except ConfigError as e:
+            return volver(URL_INVITADOS, f"No se pudo agregar: {e}", "error")
+        aviso = "" if elegidas else " Todavía no ve ninguna materia: elegíselas en su fila."
+        return volver(URL_INVITADOS, f"{email} agregado: ya puede entrar por el dominio si también está en la "
+                                     f"policy de Cloudflare Access.{aviso}", "aviso" if aviso else "ok")
+
+    @router.post(f"{URL_INVITADOS}/guardar")
+    async def invitados_guardar(request: Request) -> RedirectResponse:
+        solo_el_dueno(request)
+        email, elegidas = await form_invitado(request)
+        try:
+            email = request.app.state.config_viva.poner_invitado(email, elegidas, nuevo=False)
+        except ConfigError as e:
+            return volver(URL_INVITADOS, f"No se pudo guardar: {e}", "error")
+        return volver(URL_INVITADOS, f"Guardado: {email} ve {len(elegidas)} materia{'' if len(elegidas) == 1 else 's'}"
+                                     " desde su próximo pedido.")
+
+    @router.post(f"{URL_INVITADOS}/sacar")
+    async def invitados_sacar(request: Request) -> RedirectResponse:
+        solo_el_dueno(request)
+        email, _ = await form_invitado(request)
+        try:
+            sacado = request.app.state.config_viva.sacar_invitado(email)
+        except ConfigError as e:
+            return volver(URL_INVITADOS, f"No se pudo sacar: {e}", "error")
+        if not sacado:
+            return volver(URL_INVITADOS, f"{email.strip() or 'Ese mail'} ya no era invitado.", "aviso")
+        return volver(URL_INVITADOS, f"{email.strip().lower()} ya no entra (desde su próximo pedido). Si querés, "
+                                     "sacalo también de la policy de Cloudflare Access.")
 
     # --- estilo ---
     @router.get("/panel/estilo", response_class=HTMLResponse)
@@ -1397,6 +2006,8 @@ def crear_router(cfg: Config) -> APIRouter:
                 # else: `apunte.modelo: null` (el default del Agent SDK) y la opción vacía: queda así.
                 if "apunte_esfuerzo" in datos:
                     apunte["esfuerzo"] = _esfuerzo_form(datos["apunte_esfuerzo"], "apunte")
+                if "apunte_web_form" in datos:  # el casillero sin marcar no viaja: el oculto dice que estaba
+                    apunte["web"] = datos.get("apunte_web") == "on"
                 cambios["apunte"] = apunte
         claude: dict[str, Any] = {}
         if "facturacion" in datos:

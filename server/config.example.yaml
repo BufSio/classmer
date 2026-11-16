@@ -14,6 +14,27 @@ servidor:
   host: 0.0.0.0
   port: 8000
 
+# --- El panel por internet (§13, §14) -----------------------------------------------------
+# Con Cloudflare Tunnel (cloudflared en esta PC, la ruta a http://127.0.0.1:8000 sólo para
+# ^/panel(/.*)?$) y Cloudflare Access adelante. Por el dominio hacen falta tres cosas: pasar Access,
+# un JWT de Access válido (lo valida el server en cada pedido) y la contraseña del panel.
+# Sin dominio_publico, o sin cloudflare_access completo (equipo, aud y emails), por el dominio da
+# 403. Se lee sin reiniciar. Valores de ejemplo:
+# panel:
+#   dominio_publico: panel.ejemplo.com          # el único dominio público que se acepta
+#   cloudflare_access:
+#     equipo: mi-equipo.cloudflareaccess.com    # el "team domain" de Zero Trust
+#     aud: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # AUD de la aplicación
+#     emails: [alguien@ejemplo.com]             # los dueños (el mail del JWT): con la contraseña
+#   # Invitados de sólo lectura: entran sólo por el dominio, con Access y sin la contraseña del panel,
+#   # y ven sólo las clases y los pendientes de `materias` (ids de abajo; una lista explícita: no hay
+#   # "todas", y una materia nueva no la ven hasta que se la sumes). Mails en minúscula, sin repetir y
+#   # nunca uno de `emails`. Se editan desde el panel (Invitados); el mail también tiene que estar en la
+#   # policy de Cloudflare Access de la aplicación.
+#   invitados:
+#     - email: invitado@ejemplo.com
+#       materias: [analisis, macro]
+
 zona_horaria: America/Argentina/Buenos_Aires
 
 # --- Motores de IA por tarea (§7) ---------------------------------------------------------
@@ -50,6 +71,10 @@ apunte:
   max_intentos_compilacion: 5
   tope_correccion_min: 10    # tiempo máximo corrigiendo errores de compilación
   timeout_min: 45            # tope total del agente (escribir + compilar)
+  web:                       # búsqueda en internet (WebSearch y WebFetch), para todas las materias
+    activa: true             # el agente puede buscar cuando lo crea necesario (también en el panel, Modelos)
+    max_busquedas: 12        # por corrida (cada una puede hacer hasta 8 consultas: con la API, USD 0,01 cada una)
+    max_paginas: 8           # páginas que puede abrir por corrida (sólo las que salieron en una búsqueda)
 
 segmentar:
   bloque_s: 600              # largo objetivo de cada bloque (~10 min)
@@ -97,7 +122,9 @@ estilo_global: |
 # apunte: modelo y esfuerzo propios del apunte de esta materia, p. ej.
 #   apunte: {modelo: claude-opus-5-5, esfuerzo: max}
 #   Sin esta clave, la materia usa el modelo y el esfuerzo globales de `apunte`.
-# Todo esto se puede editar desde el panel (http://127.0.0.1:8000/panel) sin reiniciar.
+# Todo esto se puede editar desde el panel (http://127.0.0.1:8000/panel) sin reiniciar. Desde otra
+#   PC de la red (y por el dominio, ver `panel`), el panel pide la contraseña que se pone en la PC del
+#   server, en Acceso (http://127.0.0.1:8000/panel/acceso); no va en este archivo.
 
 materias:
   - id: analisis

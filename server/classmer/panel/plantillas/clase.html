@@ -49,10 +49,13 @@ button.oir { padding: 2px 8px; font-size: 12px; }
   {% if duracion_ms %}<span>{{ duracion_ms | duracion }}</span>{% endif %}
   {% if s.importada %}<span class="etiqueta" title="No la grabó la app: se importó (audio de otro, la grabadora, un video)">importada</span>{% endif %}
   <span class="estado {{ s.estado }}"{% if s.importada and s.estado == 'grabando' %} title="La app está subiendo el audio importado"{% endif %}>{{ s.estado | estado_texto(s.importada) }}</span>
-  {% if s.etapa %}<span class="chico">etapa: {{ s.etapa }}</span>{% endif %}
+  {% if s.etapa and not invitado %}<span class="chico">etapa: {{ s.etapa }}</span>{% endif %}
   <span class="nowrap"><span class="barra-progreso"><span style="width: {{ api.progreso | porcentaje }}"></span></span> {{ api.progreso | porcentaje }}</span>
-  <span class="chico">{{ s.origen_materia or '' }}{% if s.confianza is not none %} ({{ '%.2f' | format(s.confianza) }}){% endif %}</span>
+  {% if not invitado %}<span class="chico">{{ s.origen_materia or '' }}{% if s.confianza is not none %} ({{ '%.2f' | format(s.confianza) }}){% endif %}</span>{% endif %}
 </div>
+{% if not invitado %}
+{# Sólo el dueño: errores, avisos de publicación, acciones, la importación y la revisión. Al invitado,
+   además, la vista ni le pasa esos datos (clase_solo_lectura). #}
 {% if s.error %}<div class="msg {{ 'aviso' if s.estado == 'esperando_usuario' else 'error' }}">{{ s.error }}</div>{% endif %}
 {% for p in avisos_pub %}
 <div class="msg aviso">Una carpeta publicada antes quedó sin archivar: {{ p.aviso or 'no se pudo archivar' }}. <span class="chico">({{ p.ruta }})</span></div>
@@ -112,16 +115,23 @@ button.oir { padding: 2px 8px; font-size: 12px; }
   {% for a in imp.avisos %}<div class="aviso-texto">{{ a }}</div>{% endfor %}
 </div>
 {% endif %}
+{% endif %}
 
 <div class="tarjeta reproductor">
   {% if hay_audio %}
   {% if hay_audio_celu %}<div class="pista"><span>Principal</span>{% endif %}
   <audio id="audio" controls preload="metadata" src="/panel/clases/{{ s.id }}/audio"></audio>
+  <a class="bajar" href="/panel/clases/{{ s.id }}/audio?descargar=1">Descargar</a>
   {% if hay_audio_celu %}</div>
-  <div class="pista"><span>Celu</span><audio id="audio-celu" controls preload="metadata" src="/panel/clases/{{ s.id }}/audio-celu" data-desfase="{{ celu.desfase_ms or 0 }}"></audio></div>
+  <div class="pista"><span>Celu</span><audio id="audio-celu" controls preload="metadata" src="/panel/clases/{{ s.id }}/audio-celu" data-desfase="{{ celu.desfase_ms or 0 }}"></audio>
+    <a class="bajar" href="/panel/clases/{{ s.id }}/audio-celu?descargar=1">Descargar</a></div>
+  {% if invitado %}
+  <div class="chico">Los minutos de abajo son los del audio principal.{% if not audio_celu_reproducible %} El navegador puede no reproducir el del celu: descargalo.{% endif %}</div>
+  {% else %}
   <div class="chico">Desfase del celu: {{ '%.2f' | format((celu.desfase_ms or 0) / 1000) }} s{% if celu.desfase_origen == 'correlacion' %} (medido por correlación){% elif celu.desfase_origen == 'app' %} (de la app){% endif %}. Los minutos de abajo son los del audio principal.{% if not audio_celu_reproducible %} El navegador puede no reproducir este formato.{% endif %}</div>
   {% endif %}
-  {% if not audio_reproducible %}<div class="chico">El navegador no reproduce este formato: la copia para el panel se arma al verificar la clase.</div>{% endif %}
+  {% endif %}
+  {% if not audio_reproducible %}<div class="chico">El navegador no reproduce este formato{% if invitado %}: descargalo.{% else %}: la copia para el panel se arma al verificar la clase.{% endif %}</div>{% endif %}
   {% elif s.importada and s.estado == 'grabando' %}
   <p class="vacio" style="margin:0">La app está subiendo el audio de esta clase importada.</p>
   {% else %}
@@ -129,7 +139,7 @@ button.oir { padding: 2px 8px; font-size: 12px; }
   {% endif %}
 </div>
 
-{% if rev %}
+{% if rev and not invitado %}
 <h2 id="revision">Revisión del transcript</h2>
 <div class="tarjeta">
   <div class="chico">
@@ -202,10 +212,15 @@ button.oir { padding: 2px 8px; font-size: 12px; }
 <div class="tarjeta">
   <div class="acciones">
     <strong>Versión vigente: v{{ actual.version }}</strong>
-    {% if url_pdf %}<a class="boton" href="{{ url_pdf }}" target="_blank">Abrir PDF</a>{% endif %}
-    {% if hay_tex %}<a class="boton" href="/panel/clases/{{ s.id }}/apunte.tex" target="_blank">Ver .tex</a>{% endif %}
-    {% if s.ruta_publicada %}<span class="chico" title="{{ s.ruta_publicada }}">Publicada en {{ s.ruta_publicada }}</span>{% endif %}
+    {% if url_pdf %}<a class="boton" href="{{ url_pdf }}" target="_blank">Abrir PDF</a>
+    <a class="boton" href="{{ url_pdf }}&amp;descargar=1">Descargar PDF</a>{% endif %}
+    {% if hay_tex %}<a class="boton" href="/panel/clases/{{ s.id }}/apunte.tex" target="_blank">Ver .tex</a>
+    <a class="boton" href="/panel/clases/{{ s.id }}/apunte.tex?descargar=1">Descargar .tex</a>{% endif %}
+    {% if s.ruta_publicada and not invitado %}<span class="chico" title="{{ s.ruta_publicada }}">Publicada en {{ s.ruta_publicada }}</span>{% endif %}
   </div>
+  {% if invitado %}
+  <div class="chico" style="margin-top:8px">{{ actual.creado | fecha }}</div>
+  {% else %}
   <div class="chico" style="margin-top:8px">
     {{ actual.modelo or 'modelo por defecto' }} · esfuerzo {{ actual.esfuerzo or 'por defecto' }}
     {%- if actual.facturacion %} · facturación: {{ actual.facturacion | pago }}{% endif %}
@@ -213,6 +228,7 @@ button.oir { padding: 2px 8px; font-size: 12px; }
     · prompt {{ (actual.prompt_version or '—')[:10] }} · {{ actual.creado | fecha }} · {{ 'compiló' if actual.compilo else 'no compiló' }}
   </div>
   {% if aviso_version %}<div class="msg aviso" style="margin:10px 0 0">{{ aviso_version }}</div>{% endif %}
+  {% endif %}
 </div>
 {% endif %}
 {% if url_pdf %}
@@ -223,6 +239,23 @@ button.oir { padding: 2px 8px; font-size: 12px; }
 
 {% if anteriores %}
 <h3>{{ 'Otras versiones' if hay_mas_nuevas else 'Versiones anteriores' }}</h3>
+{% if invitado %}
+<table>
+  <thead><tr><th class="num">Versión</th><th>Fecha</th><th>Archivos</th></tr></thead>
+  <tbody>
+  {% for x in anteriores %}{% set a = x.a %}
+  <tr>
+    <td class="num">v{{ a.version }}</td>
+    <td class="chico nowrap">{{ a.creado | fecha }}<div>{{ a.titulo or '' }}</div></td>
+    <td class="nowrap">
+      {% if x.pdf %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.pdf" target="_blank">PDF</a> <a class="bajar" href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.pdf?descargar=1">(bajar)</a>{% endif %}
+      {% if x.tex %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.tex" target="_blank">.tex</a> <a class="bajar" href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.tex?descargar=1">(bajar)</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
 <table>
   <thead><tr><th class="num">Versión</th><th>Fecha</th><th>Modelo</th><th>Esfuerzo</th><th>Facturación</th><th>Prompt</th><th>Compiló</th><th>Costo</th><th>Archivos</th></tr></thead>
   <tbody>
@@ -237,16 +270,17 @@ button.oir { padding: 2px 8px; font-size: 12px; }
     <td>{{ 'sí' if a.compilo else 'no' }}</td>
     <td class="chico">{{ a.costo | costo(a.facturacion) }}</td>
     <td class="nowrap">
-      {% if x.pdf %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.pdf" target="_blank">PDF</a>{% endif %}
-      {% if x.tex %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.tex" target="_blank">.tex</a>{% endif %}
+      {% if x.pdf %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.pdf" target="_blank">PDF</a> <a class="bajar" href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.pdf?descargar=1">(bajar)</a>{% endif %}
+      {% if x.tex %}<a href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.tex" target="_blank">.tex</a> <a class="bajar" href="/panel/clases/{{ s.id }}/apunte/v{{ a.version }}.tex?descargar=1">(bajar)</a>{% endif %}
     </td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 {% endif %}
+{% endif %}
 
-{% if publicaciones %}
+{% if publicaciones and not invitado %}
 <h3>Publicación</h3>
 <table>
   <thead><tr><th>Estado</th><th class="num">Versión</th><th>Carpeta en la materia</th><th>Archivo / aviso</th><th>Actualizado</th></tr></thead>
@@ -275,7 +309,7 @@ button.oir { padding: 2px 8px; font-size: 12px; }
     <td>{{ it.texto }}{% if it.fecha_limite %} <span class="chico">(para el {{ it.fecha_limite }})</span>{% endif %}</td>
     <td>{% if it.offset_ms is not none %}<a href="#" class="t" data-ms="{{ it.offset_ms }}">{{ it.offset_ms | hhmmss }}</a>{% endif %}</td>
     <td><span class="estado {{ it.estado }}">{{ it.estado }}</span></td>
-    <td class="nowrap">{% include "_item_botones.html" %}</td>
+    <td class="nowrap">{% if not invitado %}{% include "_item_botones.html" %}{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -285,27 +319,31 @@ button.oir { padding: 2px 8px; font-size: 12px; }
 <h2>Adjuntos{% if adjuntos_clase %} ({{ adjuntos_clase | length }}){% endif %}</h2>
 {% if adjuntos_clase %}
 <table class="adjuntos">
-  <thead><tr><th>Archivo</th><th>Tipo</th><th class="num">Tamaño</th><th>Minuto</th><th>Estado</th><th></th></tr></thead>
+  <thead><tr><th>Archivo</th><th>Tipo</th><th class="num">Tamaño</th><th>Minuto</th>{% if not invitado %}<th>Estado</th>{% endif %}<th></th></tr></thead>
   <tbody>
   {% for a in adjuntos_clase %}
   <tr>
-    <td><a href="{{ a.url }}" target="_blank">{{ a.nombre_original }}</a>{% if a.origen == 'panel' %} <span class="chico">(desde el panel)</span>{% endif %}</td>
+    <td><a href="{{ a.url }}" target="_blank">{{ a.nombre_original }}</a>{% if a.origen == 'panel' and not invitado %} <span class="chico">(desde el panel)</span>{% endif %}</td>
     <td class="chico nowrap">{{ a.descripcion }}</td>
     <td class="num chico">{{ a.bytes | tamano }}</td>
     <td class="nowrap">{% if a.offset_ms is not none %}<a href="#" class="t" data-ms="{{ a.offset_ms }}">{{ a.offset_ms | hhmmss }}</a>{% else %}<span class="chico">sin minuto</span>{% endif %}</td>
-    <td><span class="estado {{ a.estado_css }}">{{ a.estado_texto }}</span> <span class="chico">{{ a.estado_ayuda }}</span></td>
+    {% if not invitado %}<td><span class="estado {{ a.estado_css }}">{{ a.estado_texto }}</span> <span class="chico">{{ a.estado_ayuda }}</span></td>{% endif %}
     <td class="nowrap"><a href="{{ a.url_descarga }}">Descargar</a></td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
+{% elif invitado %}
+<p class="vacio">Esta clase no tiene adjuntos.</p>
 {% endif %}
+{% if not invitado %}
 <div class="tarjeta subir-adjuntos">
   <form class="linea" method="post" action="/panel/clases/{{ s.id }}/adjuntos" enctype="multipart/form-data">
     <input type="file" name="archivos" multiple required accept="{{ acepta_adjuntos }}">
     <button type="submit">Adjuntar</button>
   </form>
   <div class="chico">PDF de slides o notas del profe, o imágenes ({{ tipos_adjunto }}, hasta {{ max_adjunto_mb }} MB cada uno): el agente los usa como material de referencia al hacer el apunte.</div>
+  {% if por_el_dominio %}<div class="chico aviso-texto">Por el dominio, hasta {{ tope_dominio_mb }} MB por envío (lo corta Cloudflare): lo más pesado, desde la LAN.</div>{% endif %}
 </div>
 
 <h2>Audio del celu</h2>
@@ -320,10 +358,12 @@ button.oir { padding: 2px 8px; font-size: 12px; }
     <button type="submit">{{ 'Reemplazar el audio del celu' if celu else 'Agregar audio del celu' }}</button>
   </form>
   <div class="chico">Un audio de esta misma clase grabado con otra app (la grabadora del celu, por ejemplo). El desfase con el principal se mide solo; se transcribe y se vuelve a revisar el transcript con las dos grabaciones.</div>
+  {% if por_el_dominio %}<div class="chico aviso-texto">Por el dominio, hasta {{ tope_dominio_mb }} MB (lo corta Cloudflare): los audios largos, desde la LAN.</div>{% endif %}
   {% elif not celu %}
   <div class="chico">Cuando la clase termine de procesarse vas a poder agregarle un audio del celu grabado aparte.</div>
   {% endif %}
 </div>
+{% endif %}
 
 {% if fotos %}
 <h2>Fotos ({{ fotos | length }})</h2>
@@ -331,14 +371,14 @@ button.oir { padding: 2px 8px; font-size: 12px; }
   {% for f in fotos %}
   <figure>
     <a href="/panel/clases/{{ s.id }}/archivo/{{ f.ruta }}" target="_blank"><img loading="lazy" src="/panel/clases/{{ s.id }}/archivo/{{ f.ruta }}" alt="Foto de la pizarra"></a>
-    <figcaption>{% if f.offset_ms is not none %}<a href="#" class="t" data-ms="{{ f.offset_ms }}">{{ f.offset_ms | hhmmss }}</a>{% else %}sin minuto{% endif %}</figcaption>
+    <figcaption>{% if f.offset_ms is not none %}<a href="#" class="t" data-ms="{{ f.offset_ms }}">{{ f.offset_ms | hhmmss }}</a>{% else %}sin minuto{% endif %} · <a class="bajar" href="/panel/clases/{{ s.id }}/archivo/{{ f.ruta }}?descargar=1">Descargar</a></figcaption>
   </figure>
   {% endfor %}
 </div>
 {% endif %}
 
 {% set notas = eventos | rejectattr('tipo', 'equalto', 'foto') | list %}
-{% if notas %}
+{% if notas and (not invitado or ve_notas) %}
 <h2>Notas y marcas</h2>
 <table>
   <thead><tr><th>Minuto</th><th>Tipo</th><th>Detalle</th></tr></thead>
@@ -357,7 +397,7 @@ button.oir { padding: 2px 8px; font-size: 12px; }
 <div class="dos">
   <div>
     <h2>Transcript</h2>
-    {% if transcripts | length > 1 %}<div class="transcripts chico" style="margin:-6px 0 8px">{% for x in transcripts %}<a href="/panel/clases/{{ s.id }}/transcript/{{ x.cual }}" target="_blank">{{ x.nombre }}</a>{% endfor %}</div>{% endif %}
+    {% if transcripts %}<div class="transcripts chico" style="margin:-6px 0 8px">{% for x in transcripts %}<span class="nowrap"><a href="/panel/clases/{{ s.id }}/transcript/{{ x.cual }}" target="_blank">{{ x.nombre }}</a> <a class="bajar" href="/panel/clases/{{ s.id }}/transcript/{{ x.cual }}?descargar=1">(bajar)</a></span> {% endfor %}</div>{% endif %}
     {% if transcript %}
     <div class="tarjeta desplazable">
       {% for seg in transcript %}
@@ -382,6 +422,7 @@ button.oir { padding: 2px 8px; font-size: 12px; }
   </div>
 </div>
 
+{% if not invitado %}
 <h2>Procesamiento</h2>
 {% if jobs %}
 <table>
@@ -412,6 +453,7 @@ button.oir { padding: 2px 8px; font-size: 12px; }
 </details>
 {% endif %}
 <p class="chico" style="margin-top:20px">Sesión {{ s.id }} · dispositivo {{ s.dispositivo or '—' }} · creada {{ s.creado | fecha }}</p>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}

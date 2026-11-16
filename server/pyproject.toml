@@ -23,6 +23,7 @@ dependencies = [
     "anthropic>=1.15",
     "pillow-heif>=1.0",
     "pypdf>=5.0",
+    "pyjwt[crypto]>=2.10",
 ]
 
 [project.scripts]

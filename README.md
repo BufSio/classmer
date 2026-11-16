@@ -134,9 +134,16 @@ Desktop and Codex without writing the token into their config.
   review, notes) picks its model and effort from a list, globally or per subject.
 - Importing a class that was not recorded with the app, such as a voice note from WhatsApp plus
   photos and PDFs. Photos are placed on the timeline by their EXIF time.
-- A web panel (localhost only) with the classes, audio playback from any minute, transcript
-  review, attachments, subjects, models and pending items. YAML config is edited live and keeps its
-  comments.
+- A web panel with the classes, audio playback from any minute, transcript review, attachments,
+  subjects, models and pending items. YAML config is edited live and keeps its comments. It opens
+  without a login on the server PC, with a password from the local network, and optionally from the
+  internet through Cloudflare Tunnel and Access, where the server validates the Access JWT on every
+  request.
+- Read-only guests: a classmate signs in through Cloudflare Access and sees only the classes of the
+  subjects I enable for them, behind a route allowlist on the server.
+- Web search for the notes agent, to check a figure or a news item against its source. A hook
+  decides every tool call: the agent can only open pages that came back from a search in the same
+  run, never an IP, localhost or the local network, and anything from the web is cited as such.
 - A Windows scheduled-task supervisor that runs the server headless, restarts it and never starts
   two of them.
 

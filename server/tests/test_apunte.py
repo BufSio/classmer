@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from PIL import Image
 from classmer import cola, latex, sesiones
 from classmer.cola import Job
 from classmer.config import ModeloApunte, cargar_config
-from classmer.ia.agente_apunte import ESPERA_SOBRECARGA_S, AgenteClaude, ResultadoAgente, TrabajoApunte
+from classmer.ia.agente_apunte import ESPERA_SOBRECARGA_S, AgenteClaude, ResultadoAgente, TrabajoApunte, WebCorrida
 from classmer.ia.facturacion import SinCreditos
 from classmer.pipeline import CuotaAgotada, ErrorEtapa, Servicios, actualizar_sesion
 from classmer.pipeline import apunte as etapa
@@ -914,3 +915,62 @@ def test_foto_real_de_varios_mb_llega_intacta_al_agente_y_al_pdf(ctx, tmp_path):
     assert (workdir / "input" / "fotos" / "pizarra_01.jpg").read_bytes() == original.read_bytes()
     pdf = carpeta / "apunte" / "v1" / "apunte.pdf"
     assert pdf.is_file() and pdf.stat().st_size >= original.stat().st_size  # JPEG embebido sin recomprimir
+
+
+# --- búsqueda en internet: el prompt y la corrida -------------------------------------------------
+
+def test_web_activa_por_defecto_llega_al_prompt_y_al_trabajo(ctx, materia_dir, compilar_falso):
+    ctx.cfg.panel.dominio_publico = "panel.ejemplo-classmer.com.ar"
+    armar(ctx)
+    agente = usar(ctx, AgenteFalso(ctx.cfg))
+    etapa.ejecutar(ctx, job())
+    t = agente.trabajos[0]
+    assert t.web == WebCorrida(max_busquedas=12, max_paginas=8, dominio_propio="panel.ejemplo-classmer.com.ar")
+    sistema = t.prompt_sistema
+    assert "# Búsqueda en internet" in sistema and "=====" not in sistema
+    assert "Hasta 12 búsquedas y 8 páginas por apunte" in sistema
+    assert "{max_busquedas}" not in sistema and "{max_paginas}" not in sistema
+    assert "agregadoIA" in sistema.split("# Búsqueda en internet")[1]
+    # La sección va entre el material adjunto y el estilo por defecto.
+    assert sistema.index("# Material adjunto") < sistema.index("# Búsqueda en internet") < \
+        sistema.index("# Estilo por defecto")
+
+
+def test_web_apagada_prompt_como_antes(ctx, materia_dir, compilar_falso):
+    armar(ctx)
+    agente = usar(ctx, AgenteFalso(ctx.cfg))
+    etapa.ejecutar(ctx, job())
+    con_web = filas(ctx, "SELECT version FROM prompts")[0]["version"]
+
+    ctx.cfg.apunte.web.activa = False
+    agente.trabajos.clear()
+    etapa.ejecutar(ctx, job())
+    t = agente.trabajos[0]
+    assert t.web is None
+    assert "Búsqueda en internet" not in t.prompt_sistema and "WebSearch" not in t.prompt_sistema
+    assert "=====" not in t.prompt_sistema
+    versiones = [f["version"] for f in filas(ctx, "SELECT version FROM prompts ORDER BY id")]
+    assert len(versiones) == 2 and versiones[0] == con_web and versiones[1] != con_web
+    # Apagada, el sistema es el de antes del bloque: el archivo sin las líneas WEB … FIN WEB.
+    sistema, _ = etapa.cargar_prompt()
+    sin_bloque = re.sub(r"===== WEB =====\n.*?===== FIN WEB =====\n\n", "", sistema, flags=re.S)
+    assert etapa.con_bloque_web(sistema, False) == sin_bloque
+    assert "\n\n\n" not in etapa.con_bloque_web(sistema, False).split("# Estilo por defecto")[0][-400:]
+
+
+def test_los_topes_de_la_config_llegan_al_prompt(ctx, materia_dir):
+    workdir = ctx.job_dir(SID, "apunte")
+    (workdir / "input").mkdir(parents=True)
+    for nombre in ("perfil.md", "timeline.md", "clase_anterior.md"):
+        (workdir / "input" / nombre).write_text("x", encoding="utf-8")
+    contexto = {"materia": "Materia de Prueba", "numero_clase": 1, "fecha_larga": "15 de octubre de 2026",
+                "fecha": "2026-10-15",
+                "tipo_clase": "teorica", "duracion_ms": None}
+    materia = ctx.cfg.materias[0]
+    web = WebCorrida(max_busquedas=3, max_paginas=1)
+    sistema, _, version, _ = etapa.armar_prompt(ctx.cfg, materia, contexto, workdir, [], web=web)
+    assert "Hasta 3 búsquedas y 1 páginas por apunte" in sistema
+    otro, _, version2, _ = etapa.armar_prompt(ctx.cfg, materia, contexto, workdir, [], web=None)
+    assert "Búsqueda en internet" not in otro and version != version2
+    # Sin pasar `web`, la de la config (prendida por defecto).
+    assert "Búsqueda en internet" in etapa.armar_prompt(ctx.cfg, materia, contexto, workdir, [])[0]

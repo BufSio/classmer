@@ -28,7 +28,7 @@ fieldset { border: none; margin: 0; padding: 0; min-width: 0; }
 <form id="form-importar" class="tarjeta" novalidate>
   <fieldset id="campos">
   <div class="campos">
-    <label for="audio">Audio<span class="ayuda">El de WhatsApp (.opus, .m4a), el de la grabadora, un video .mp4…: lo que lea ffmpeg, hasta 2 GB.</span></label>
+    <label for="audio">Audio<span class="ayuda">El de WhatsApp (.opus, .m4a), el de la grabadora, un video .mp4…: lo que lea ffmpeg, hasta 2 GB.{% if por_el_dominio %} <strong>Por el dominio, hasta {{ tope_dominio_mb }} MB (lo corta Cloudflare): los audios largos, desde la LAN.</strong>{% endif %}</span></label>
     <div data-campo="audio">
       <input type="file" id="audio" accept="{{ acepta_audio }}">
       <div id="progreso" class="progreso" hidden><progress id="barra" max="100" value="0"></progress><span id="progreso-texto" class="chico"></span></div>
@@ -201,6 +201,14 @@ fieldset { border: none; margin: 0; padding: 0; min-width: 0; }
       soltar();
       limpiar();
       error(archivo.name + ' pesa ' + tamano(archivo.size) + ': el máximo para importar es 2 GB.', 'audio');
+      return;
+    }
+    if (conAudio && DATOS.tope_dominio && archivo.size > DATOS.tope_dominio) {  // Cloudflare corta antes
+      if (pedido) pedido.abort();
+      soltar();
+      limpiar();
+      error(archivo.name + ' pesa ' + tamano(archivo.size) + ': por el dominio se sube hasta '
+            + Math.round(DATOS.tope_dominio / 1e6) + ' MB (lo corta Cloudflare). Importalo desde la LAN.', 'audio');
       return;
     }
     const datos = new FormData();

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -839,3 +841,113 @@ def test_recarga_del_tipo_de_revisión(home_vieja: Path):
     assert cfg.materia("historia").revision == "apagada"
     ruta.write_text(original, encoding="utf-8")
     assert viva.recargar() and viva.error is None and cfg.materia("historia").revision == "automatica"
+
+
+# --- apunte.web (búsqueda en internet del agente del apunte) --------------------------------------
+
+def test_web_del_apunte_por_defecto(home_vieja: Path):
+    cfg = cargar_config(home_vieja)  # CONFIG_VIEJA no tiene `web:`: prendida, con los topes por defecto
+    assert (cfg.apunte.web.activa, cfg.apunte.web.max_busquedas, cfg.apunte.web.max_paginas) == (True, 12, 8)
+
+
+@pytest.mark.parametrize("bloque, esperado", [
+    ("  web:\n    activa: false\n", (False, 12, 8)),
+    ("  web:\n    max_busquedas: 4\n", (True, 4, 8)),
+    ("  web:\n    activa: true\n    max_busquedas: 1\n    max_paginas: 50\n", (True, 1, 50)),
+    ("  web:\n", (True, 12, 8)),                          # `web:` vacío
+])
+def test_web_del_apunte_escrita_a_mano(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bloque, esperado):
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "config.yaml").write_text(CONFIG_VIEJA.replace("  timeout_min: 45            # tope total del agente "
+                                                           "(escribir + compilar)\n",
+                                                           "  timeout_min: 45\n" + bloque), encoding="utf-8")
+    monkeypatch.setenv("CLASSMER_HOME", str(home))
+    w = cargar_config(home).apunte.web
+    assert (w.activa, w.max_busquedas, w.max_paginas) == esperado
+
+
+@pytest.mark.parametrize("bloque", [
+    "  web:\n    max_busquedas: 0\n",
+    "  web:\n    max_paginas: 51\n",
+    "  web:\n    max_paginas: -1\n",
+    "  web:\n    max_busquedas: muchas\n",
+    "  web:\n    max_busquedas: 2.5\n",
+    "  web:\n    max_busquedas: true\n",
+    "  web:\n    activa: quizás\n",
+    "  web: si\n",
+])
+def test_web_del_apunte_invalida(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bloque):
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "config.yaml").write_text(CONFIG_VIEJA.replace("  timeout_min: 45            # tope total del agente "
+                                                           "(escribir + compilar)\n",
+                                                           "  timeout_min: 45\n" + bloque), encoding="utf-8")
+    monkeypatch.setenv("CLASSMER_HOME", str(home))
+    with pytest.raises((ConfigError, ValidationError)):
+        cargar_config(home)
+
+
+def test_casillero_de_la_web(home_vieja: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = cargar_config(home_vieja)
+    viva = ConfigViva(cfg)
+    antes = lineas(home_vieja)
+    # Prendida (el default) y sin `web:` en el archivo: no se escribe nada.
+    escrituras: list[Any] = []
+    real = config_vivo.escribir_atomico
+    monkeypatch.setattr(config_vivo, "escribir_atomico", lambda *a, **k: (escrituras.append(a), real(*a, **k)))
+    viva.editar_modelos({"apunte": {"web": True}})
+    assert escrituras == [] and lineas(home_vieja) == antes
+
+    # Apagarla agrega sólo `web:` / `activa: false` al final de `apunte:`, y el resto queda igual.
+    viva.editar_modelos({"apunte": {"web": False}})
+    despues = lineas(home_vieja)
+    assert [linea for linea in despues if linea not in antes] == ["  web:", "    activa: false"]
+    assert [linea for linea in antes if linea not in despues] == []
+    i = despues.index("  web:")
+    assert despues[i - 1].startswith("  timeout_min: 45") and despues[i + 2] == ""
+    assert comentarios(despues) == comentarios(antes)
+    assert cfg.apunte.web.activa is False  # aplicada en vivo
+
+    # Prenderla de nuevo cambia el valor (la clave ya estaba) y respeta los topes escritos a mano.
+    texto_ = texto(home_vieja).replace("    activa: false\n", "    activa: false   # la apagué\n"
+                                       "    max_busquedas: 3\n")
+    (home_vieja / "config.yaml").write_text(texto_, encoding="utf-8")
+    viva.recargar(forzar=True)
+    viva.editar_modelos({"apunte": {"web": True, "esfuerzo": "high"}})
+    t = texto(home_vieja)
+    assert re.search(r"\n    activa: true +# la apagué\n    max_busquedas: 3\n", t), t  # el comentario se queda
+    assert (cfg.apunte.web.activa, cfg.apunte.web.max_busquedas) == (True, 3)
+
+
+def test_casillero_de_la_web_con_topes_sin_activa(home_vieja: Path):
+    t = texto(home_vieja).replace("  timeout_min: 45            # tope total del agente (escribir + compilar)\n",
+                                  "  timeout_min: 45\n  web:\n    max_paginas: 2\n")
+    (home_vieja / "config.yaml").write_text(t, encoding="utf-8")
+    cfg = cargar_config(home_vieja)
+    ConfigViva(cfg).editar_modelos({"apunte": {"web": False}})
+    assert "  web:\n    activa: false\n    max_paginas: 2\n" in texto(home_vieja)
+    assert (cfg.apunte.web.activa, cfg.apunte.web.max_paginas) == (False, 2)
+
+
+def test_casillero_de_la_web_sin_seccion_apunte(home: Path, cfg):
+    ConfigViva(cfg).editar_modelos({"apunte": {"web": False}})
+    guardada = yaml.safe_load(texto(home))
+    assert guardada["apunte"] == {"web": {"activa": False}} and cfg.apunte.web.activa is False
+
+
+@pytest.mark.parametrize("valor", ["si", 1, None, "on"])
+def test_casillero_de_la_web_invalido(home_vieja: Path, valor):
+    antes = (home_vieja / "config.yaml").read_bytes()
+    with pytest.raises(ConfigError, match="apunte.web tiene que ser true o false"):
+        ConfigViva(cargar_config(home_vieja)).editar_modelos({"apunte": {"web": valor}})
+    assert (home_vieja / "config.yaml").read_bytes() == antes
+
+
+def test_config_de_ejemplo_trae_la_web(home_ejemplo: Path):
+    cfg = cargar_config(home_ejemplo)
+    assert (cfg.apunte.web.activa, cfg.apunte.web.max_busquedas, cfg.apunte.web.max_paginas) == (True, 12, 8)
+    assert "web:" in texto(home_ejemplo) and "max_busquedas: 12" in texto(home_ejemplo)
+    ConfigViva(cfg).editar_modelos({"apunte": {"web": False}})
+    t = texto(home_ejemplo)
+    assert "activa: false" in t and "max_busquedas: 12" in t and cfg.apunte.web.activa is False
